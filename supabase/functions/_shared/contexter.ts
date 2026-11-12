@@ -573,15 +573,17 @@ export async function search(ctx: Ctx, query: string, limit = 15) {
 
 // ─────────────────────────────────────────────────────────────── turns & mentions
 
-export async function postEvent(ctx: Ctx, kind: string, payload: Record<string, unknown>, mentions: string[] = []) {
-  unwrap(await ctx.db.from("events").insert({
+// Returns the new event's id.
+export async function postEvent(ctx: Ctx, kind: string, payload: Record<string, unknown>, mentions: string[] = []): Promise<number> {
+  const row = unwrap(await ctx.db.from("events").insert({
     workspace_id: ctx.ws.id, session_id: ctx.session ?? null, author_id: ctx.userId, kind, payload, mentions,
-  }));
+  }).select("id").single()) as { id: number };
+  return row.id;
 }
 
-export async function postPrompt(ctx: Ctx, text: string) {
+export async function postPrompt(ctx: Ctx, text: string): Promise<number> {
   const mentions = parseMentions(text, ctx.handles.values()).filter((h) => h !== ctx.me.handle);
-  await postEvent(ctx, "prompt", { text: truncate(text, 1500) }, mentions);
+  return postEvent(ctx, "prompt", { text: truncate(text, 1500) }, mentions);
 }
 
 export async function postReply(ctx: Ctx, reply: { summary: string; text?: string; files?: string[] }) {
@@ -594,10 +596,11 @@ export async function postReply(ctx: Ctx, reply: { summary: string; text?: strin
 
 // ─────────────────────────────────────────────────────────────── work awareness
 
-// A task is one request in one session. null hides the text (a !private turn).
-export async function startTask(ctx: Ctx, task: string | null) {
+// A task is one request in one session. null hides the text (a !private turn). promptEvent is the
+// prompt event posted for it, if any: only that prompt counts as "still being worked on".
+export async function startTask(ctx: Ctx, task: string | null, promptEvent: number | null = null) {
   if (!ctx.session) return;
-  unwrap(await ctx.db.rpc("start_task", { p_session: ctx.session, p_task: task }));
+  unwrap(await ctx.db.rpc("start_task", { p_session: ctx.session, p_task: task, p_prompt_event: promptEvent }));
 }
 
 export async function finishTask(ctx: Ctx) {

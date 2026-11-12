@@ -1,7 +1,7 @@
 -- Access model + concurrency tests for the core schema. Run: npx supabase test db
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(52);
+select plan(54);
 
 -- Three people: alice (owner), bob (editor via invite), carol (viewer via invite), eve (outsider).
 insert into auth.users (id, email) values
@@ -218,7 +218,27 @@ select is((select outcome from hist), null, 'an interrupted request doesn''t bor
 select is((select active from hist), false, 'an old request isn''t "still being worked on" because its session has a new task');
 select is((select outcome from hist2), 'Summarized the related work.', 'a finished request shows its own outcome');
 select is((select count(*)::int from public.find_overlap((select id from public.workspaces), 'fix the typos in abstract wording', (select id from asess))
-            where active), 2, 'the current task matches as live (task and its prompt)');
+            where active), 1, 'the current task matches as live, once per session');
+reset role;
+
+-- one session with many matches can't crowd out another session's match
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000b');
+insert into public.events (workspace_id, session_id, kind, payload)
+  select w.id, (select id from bsess2), 'prompt', jsonb_build_object('text', 'Tune the batch size of the indexing job, attempt ' || g)
+    from public.workspaces w, generate_series(1, 6) g;
+-- a public prompt that was interrupted, then a private turn in the same session
+select public.start_task((select id from bsess), 'Benchmark the indexing job memory usage');
+insert into public.events (workspace_id, session_id, kind, payload)
+  select id, (select id from bsess), 'prompt', '{"text":"Benchmark the indexing job memory usage"}' from public.workspaces;
+select public.start_task((select id from bsess), null);
+reset role;
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000a');
+select is((select count(distinct session_id)::int from public.find_overlap((select id from public.workspaces),
+  'tune the indexing job batch size and memory usage', (select id from asess))), 2,
+  'each matching session gets a result, however many matches one session has');
+select is((select active from public.find_overlap((select id from public.workspaces),
+  'benchmark memory usage of the indexing job', (select id from asess)) where session_id = (select id from bsess)), false,
+  'an interrupted public prompt isn''t "still being worked on" during a later private turn');
 reset role;
 
 -- chat tasks end on their own after 10 quiet minutes; Claude Code tasks after an hour

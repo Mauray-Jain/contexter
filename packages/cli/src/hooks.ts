@@ -34,10 +34,12 @@ const stateDir = join(home, "sessions");
 const statePath = (sid: string) => join(stateDir, `${sid.replace(/[^\w-]/g, "_")}.json`);
 
 // warned: files this session was told a teammate recently changed (once per file per session).
-// confirmed: "<file> <handles>" pairs the user was already asked about because those teammates were
-// editing the file right now (asked again when someone else starts editing it).
+// confirmed: "<file> <handles>" conflicts the user approved an edit through, because those teammates
+// were editing the file right now (asked again when someone else starts editing it). pending: the
+// conflict asked about per file, moved to confirmed once the edit runs (a rejected edit asks again).
 interface SessionState {
   workspace: string; session: string; private?: boolean; warned?: string[]; confirmed?: string[];
+  pending?: Record<string, string>;
 }
 
 function readState(sid: string): SessionState | null {
@@ -119,7 +121,8 @@ async function userPromptSubmit(input: HookInput) {
   const isPrivate = /^\s*!private\b/i.test(prompt);
   writeState(input.session_id, { ...state, private: isPrivate });
   const shared = !isPrivate && prompt.trim() ? prompt : "";
-  await Promise.all([shared ? core.postPrompt(ctx, shared) : null, core.startTask(ctx, shared || null)]);
+  const promptEvent = shared ? await core.postPrompt(ctx, shared) : null;
+  await core.startTask(ctx, shared || null, promptEvent);
   const [delta, now, overlap, hint] = await Promise.all([
     core.feedDelta(ctx), core.workInProgress(ctx), shared ? core.overlapWarning(ctx, shared) : "", core.compactionHint(ctx),
   ]);
@@ -201,11 +204,9 @@ async function preToolUse(input: HookInput) {
   const conflict = activeBy.length ? `${path} ${[...activeBy].sort().join(",")}` : "";
   const ask = conflict && !confirmed.includes(conflict);
   if (!ask && warned.includes(path)) return;
-  writeState(input.session_id, {
-    ...state,
-    warned: warned.includes(path) ? warned : [...warned, path].slice(-200),
-    confirmed: ask ? [...confirmed, conflict].slice(-200) : confirmed,
-  });
+  writeState(input.session_id, ask
+    ? { ...state, pending: { ...state.pending, [path]: conflict } }
+    : { ...state, warned: [...warned, path].slice(-200) });
   const out: Record<string, unknown> = { hookEventName: "PreToolUse", additionalContext: warn };
   if (ask) {
     out.permissionDecision = "ask";
@@ -218,8 +219,19 @@ async function preToolUse(input: HookInput) {
 // this session's task, so teammates see it live. Private turns don't publish their files.
 async function postToolUse(input: HookInput) {
   const t = await fileTool(input);
-  if (!t || t.state.private) return;
-  await core.touchFile(t.ctx, t.path, true);
+  if (!t) return;
+  const { state, path } = t;
+  const conflict = state.pending?.[path];
+  if (conflict) {
+    // The user approved the edit through a live conflict: don't ask again for this one.
+    const { [path]: _, ...pending } = state.pending!;
+    writeState(input.session_id, {
+      ...state, pending,
+      confirmed: [...(state.confirmed ?? []), conflict].slice(-200),
+      warned: (state.warned ?? []).includes(path) ? state.warned : [...(state.warned ?? []), path].slice(-200),
+    });
+  }
+  if (!state.private) await core.touchFile(t.ctx, path, true);
 }
 
 async function sessionEnd(input: HookInput) {

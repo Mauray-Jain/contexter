@@ -216,7 +216,11 @@ await step("a file warned about as a recent change still asks once a teammate st
   const second = tryEdit("bob", "bob-3", "docs/guide.md");
   assert.equal(second.output.permissionDecision, "ask", "a live conflict asks even after the earlier warning");
   assert.match(second.context, /alice's Claude is editing docs\/guide\.md right now/);
-  assert.deepEqual(tryEdit("bob", "bob-3", "docs/guide.md").output, {}, "and only asks once");
+  // bob says no: the edit never runs, so the next attempt asks again.
+  assert.equal(tryEdit("bob", "bob-3", "docs/guide.md").output.permissionDecision, "ask", "a rejected edit asks again");
+  // bob says yes this time: the edit runs, and he isn't asked again about this conflict.
+  assert.equal(edit("bob", "bob-3", "docs/guide.md").output.permissionDecision, "ask");
+  assert.deepEqual(tryEdit("bob", "bob-3", "docs/guide.md").output, {}, "an approved conflict isn't asked again");
   hook("alice", "Stop", { session_id: "alice-r", last_assistant_message: "Added troubleshooting." });
 });
 

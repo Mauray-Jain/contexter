@@ -3,8 +3,37 @@
 --   for replies that did no real work, so a chat task counts as live for 10 minutes after the last
 --   contexter call instead of 60.
 -- * touch_file can check a file without recording it (private turns don't publish their files).
--- * find_overlap pairs a prompt only with the reply of its own turn, and marks a match "still being
---   worked on" only when it is that session's current task.
+-- * find_overlap pairs a prompt only with the reply of its own turn, marks a match "still being
+--   worked on" only when it is the prompt that started its session's live task, and returns each
+--   session's closest match before applying the limit.
+
+-- ─────────────────────────────────────────────────────────────── the prompt behind each task
+
+set lock_timeout = '5s';
+set statement_timeout = '30s';
+alter table public.sessions add column task_prompt_id bigint;
+reset statement_timeout;
+reset lock_timeout;
+
+drop function public.start_task(uuid, text);
+
+-- p_prompt_event: the prompt event posted for this task (null for private turns and chat, whose
+-- prompt is only posted when the turn ends).
+create function public.start_task(p_session uuid, p_task text, p_prompt_event bigint default null)
+returns void
+language plpgsql security invoker set search_path = ''
+as $$
+#variable_conflict use_column
+begin
+  update public.sessions
+     set current_task = left(nullif(trim(p_task), ''), 500), task_started_at = now(),
+         task_finished_at = null, task_files = '{}', task_prompt_id = p_prompt_event, last_seen_at = now()
+   where id = p_session and user_id = (select auth.uid());
+  if not found then
+    raise exception 'session not found' using errcode = 'P0002';
+  end if;
+end;
+$$;
 
 -- ─────────────────────────────────────────────────────────────── liveness
 
@@ -105,38 +134,43 @@ begin
       from cand c
       cross join lateral (select tsvector_to_array(to_tsvector('english', c.body)) as lex) lx
      where cardinality(lx.lex) > 0
+  ), best as (
+    -- Each session's closest match, so one busy session can't crowd out the others.
+    select distinct on (coalesce(sc.session_id::text, 'event-' || sc.id))
+           sc.*, (sc.shared::real / least(cardinality(words), cardinality(sc.lex)))::real as sc_score
+      from scored sc
+     where sc.shared >= 3
+       and sc.shared::real / least(cardinality(words), cardinality(sc.lex)) >= p_min_score
+     order by coalesce(sc.session_id::text, 'event-' || sc.id),
+              sc.shared::real / least(cardinality(words), cardinality(sc.lex)) desc,
+              sc.kind = 'task' desc, sc.created_at desc
   )
-  select sc.id, sc.author_id, sc.session_id, sc.kind, sc.body,
+  select b.id, b.author_id, b.session_id, b.kind, b.body,
          -- The reply that ended this prompt's turn: the first reply before the session's next prompt.
-         case when sc.kind = 'prompt' then
+         case when b.kind = 'prompt' then
            (select r.payload->>'summary' from public.events r
-             where r.session_id = sc.session_id and r.kind = 'reply' and r.id > sc.id
+             where r.session_id = b.session_id and r.kind = 'reply' and r.id > b.id
                and not exists (select 1 from public.events n
-                                where n.session_id = sc.session_id and n.kind = 'prompt'
-                                  and n.id > sc.id and n.id < r.id)
+                                where n.session_id = b.session_id and n.kind = 'prompt'
+                                  and n.id > b.id and n.id < r.id)
              order by r.id limit 1) end,
-         sc.files,
-         sc.created_at,
-         (sc.shared::real / least(cardinality(words), cardinality(sc.lex)))::real,
-         -- Still being worked on: a live task itself, or the prompt that started its session's live
-         -- task (the session's latest prompt, posted when the task started, with no reply yet).
-         sc.kind = 'task' or (
-           sc.kind = 'prompt'
+         b.files,
+         b.created_at,
+         b.sc_score,
+         -- Still being worked on: a live task itself, or the prompt that started its session's live task.
+         b.kind = 'task' or (
+           b.kind = 'prompt'
            and exists (select 1 from public.sessions o
-                        where o.id = sc.session_id and private.task_is_live(o)
-                          and sc.created_at >= o.task_started_at - interval '1 minute')
-           and not exists (select 1 from public.events n
-                            where n.session_id = sc.session_id and n.kind in ('prompt', 'reply')
-                              and n.id > sc.id))
-    from scored sc
-   where sc.shared >= 3
-     and sc.shared::real / least(cardinality(words), cardinality(sc.lex)) >= p_min_score
-   order by 9 desc, sc.created_at desc
+                        where o.id = b.session_id and o.task_prompt_id = b.id and private.task_is_live(o)))
+    from best b
+   order by b.sc_score desc, b.created_at desc
    limit p_limit;
 end;
 $$;
 
 -- ─────────────────────────────────────────────────────────────── grants
 
-revoke execute on function public.touch_file(uuid, text, interval, boolean) from public, anon;
-grant execute on function public.touch_file(uuid, text, interval, boolean) to authenticated;
+revoke execute on function public.touch_file(uuid, text, interval, boolean), public.start_task(uuid, text, bigint)
+  from public, anon;
+grant execute on function public.touch_file(uuid, text, interval, boolean), public.start_task(uuid, text, bigint)
+  to authenticated;
