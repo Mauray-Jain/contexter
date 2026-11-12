@@ -62,7 +62,7 @@ cli("bob", ["join", code, "--handle", "bob"]);
 await step("install writes hooks, skill and project link", () => {
   for (const who of ["alice", "bob"]) {
     const out = cli(who, ["install", "code", "--workspace", slug]);
-    assert.match(out, /claude mcp add --transport http .*x-contexter-client: claude-code.* contexter http/);
+    assert.match(out, /claude mcp add --transport http .* contexter http\S+ --header "x-contexter-client: claude-code"/);
     assert.deepEqual(Object.keys(installedHooks(who)).sort(), ["SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"]);
     assert.ok(readFileSync(join(root, who, ".claude/skills/contexter/SKILL.md"), "utf8").includes("name: contexter"));
     assert.equal(JSON.parse(readFileSync(join(root, who, ".contexter.json"), "utf8")).workspace, slug);

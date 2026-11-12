@@ -78,7 +78,7 @@ export function installCode(opts: { scope: "user" | "project"; workspace?: strin
     "",
     "Last step: add the contexter MCP server to Claude Code (it signs you in through the browser on first use):",
     "",
-    `  claude mcp add --transport http --scope ${opts.scope === "user" ? "user" : "project"} --header "x-contexter-client: claude-code" contexter ${mcpUrl()}`,
+    `  claude mcp add --transport http --scope ${opts.scope === "user" ? "user" : "project"} contexter ${mcpUrl()} --header "x-contexter-client: claude-code"`,
   ].join("\n");
 }
 
