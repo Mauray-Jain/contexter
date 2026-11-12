@@ -1,0 +1,10 @@
+{
+  "name": "@contexter/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": { "contexter": "./src/index.ts" },
+  "dependencies": {
+    "@supabase/supabase-js": "2.118.0",
+    "commander": "15.0.0"
+  }
+}

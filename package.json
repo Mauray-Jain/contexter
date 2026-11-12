@@ -1,0 +1,23 @@
+{
+  "name": "contexter",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "typecheck": "tsc -b packages/cli",
+    "db:start": "supabase start",
+    "db:stop": "supabase stop",
+    "db:reset": "supabase db reset",
+    "db:test": "supabase test db",
+    "ctx": "tsx packages/cli/src/index.ts",
+    "test:e2e": "scripts/e2e-local.sh"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "supabase": "2.121.0",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2"
+  }
+}
