@@ -66,7 +66,7 @@ export function projectWorkspace(cwd: string): string | undefined {
 export function projectPath(file: string, cwd: string): string | undefined {
   const root = projectRoot(cwd) ?? cwd;
   const rel = relative(root, isAbsolute(file) ? file : join(cwd, file));
-  if (!rel || rel.startsWith("..") || isAbsolute(rel)) return undefined;
+  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return undefined;
   return rel.split(sep).join("/");
 }
 
@@ -172,9 +172,9 @@ async function stop(input: HookInput) {
   await core.postReply(c.ctx, { summary: summarize(text) || "(worked on files)", text, files });
 }
 
-// Before Claude edits a file: record it on this session's task (teammates see it live) and, once
-// per file per session, warn if a teammate is editing it now or changed it recently. When someone
-// is editing it right now, the user is asked to confirm the edit.
+// Before Claude edits a file: record it on this session's task (teammates see it live; not on
+// private turns) and, once per file per session, warn if a teammate is editing it now or changed it
+// recently. When someone is editing it right now, the user is asked to confirm the edit.
 async function preToolUse(input: HookInput) {
   const file = input.tool_input?.file_path ?? input.tool_input?.notebook_path;
   if (typeof file !== "string") return;
@@ -182,7 +182,7 @@ async function preToolUse(input: HookInput) {
   if (!c) return;
   const path = projectPath(file, input.cwd ?? process.cwd());
   if (!path) return;
-  const { warn, activeBy } = await core.touchFile(c.ctx, path);
+  const { warn, activeBy } = await core.touchFile(c.ctx, path, !c.state.private);
   const warned = c.state.warned ?? [];
   if (!warn || warned.includes(path)) return;
   writeState(input.session_id, { ...c.state, warned: [...warned, path].slice(-200) });

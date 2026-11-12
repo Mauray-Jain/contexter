@@ -5,11 +5,15 @@
 
 -- A task is one user request in one session: it starts when the prompt is sent and finishes when
 -- Claude's reply ends. current_task is null for !private turns (the team sees "something private").
+set lock_timeout = '5s';
+set statement_timeout = '30s';
 alter table public.sessions
   add column current_task     text,
   add column task_started_at  timestamptz,
   add column task_finished_at timestamptz,
   add column task_files       text[] not null default '{}';
+reset statement_timeout;
+reset lock_timeout;
 
 -- A session counts as mid-task for this long without any sign of life (prompt, file edit).
 create function private.task_is_live(s public.sessions)

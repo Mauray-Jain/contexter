@@ -253,10 +253,13 @@ interface SessionRow {
   task_files: string[];
 }
 
-// Same rule as private.task_is_live: mid-task, and seen within the last hour.
+// Same rule as private.task_is_live: mid-task, and seen within the last hour (10 minutes for chat,
+// whose tasks only finish through post_turn, which Claude skips for replies that did no real work).
 const TASK_LIVE_MS = 60 * 60_000;
+const CHAT_TASK_LIVE_MS = 10 * 60_000;
 const isLive = (s: SessionRow) =>
-  !!s.task_started_at && !s.task_finished_at && Date.now() - new Date(s.last_seen_at).getTime() < TASK_LIVE_MS;
+  !!s.task_started_at && !s.task_finished_at &&
+  Date.now() - new Date(s.last_seen_at).getTime() < (s.client === "claude-chat" ? CHAT_TASK_LIVE_MS : TASK_LIVE_MS);
 
 const whoIs = (ctx: Pick<Ctx, "handles" | "userId">, userId: string) =>
   userId === ctx.userId ? "you (another session)" : ctx.handles.get(userId) ?? "someone";
@@ -632,11 +635,12 @@ export async function overlapWarning(ctx: Ctx, text: string): Promise<string> {
   ].join("\n");
 }
 
-// About to change a file (path relative to the project root): record it on this session and
-// report teammates who are editing it now or changed it recently. warn is "" when nobody is.
-export async function touchFile(ctx: Ctx, path: string): Promise<{ warn: string; activeBy: string[] }> {
+// About to change a file (path relative to the project root): record it on this session (unless
+// record is false, for private turns) and report teammates who are editing it now or changed it
+// recently. warn is "" when nobody is.
+export async function touchFile(ctx: Ctx, path: string, record = true): Promise<{ warn: string; activeBy: string[] }> {
   if (!ctx.session) return { warn: "", activeBy: [] };
-  const rows = unwrap(await ctx.db.rpc("touch_file", { p_session: ctx.session, p_path: path })) as
+  const rows = unwrap(await ctx.db.rpc("touch_file", { p_session: ctx.session, p_path: path, p_record: record })) as
     { author_id: string; session_id: string; task: string; touched_at: string; active: boolean }[];
   const bySession = new Map<string, (typeof rows)[number]>();
   for (const r of rows) {

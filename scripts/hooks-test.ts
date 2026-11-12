@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CLI, cliRunner } from "./lib/cli.ts";
 import { signIn } from "./lib/local.ts";
+import { projectPath } from "../packages/cli/src/hooks.ts";
 
 const run = Date.now().toString(36);
 const slug = `hooks-${run}`;
@@ -162,6 +163,25 @@ await step("after alice finishes, a recent change is a warning without a prompt"
   assert.doesNotMatch(p.context, /alice is working on/);
   assert.match(p.context, /Added retries with backoff to the MCP client for 503s\. \[files: src\/client\.ts\]/,
     "reply files are relative to the project root");
+});
+
+await step("private turns don't publish the files they edit", () => {
+  hook("alice", "SessionStart", { session_id: "alice-p", source: "startup" });
+  hook("alice", "UserPromptSubmit", { session_id: "alice-p", prompt: "!private rework my notes" });
+  edit("alice", "alice-p", "private/notes.md");
+  assert.equal(edit("bob", "bob-2", "private/notes.md").context, "", "bob isn't told about alice's private file");
+  const r = hook("bob", "UserPromptSubmit", { session_id: "bob-2", prompt: "what is everyone doing?" });
+  assert.match(r.context, /alice is working on something private/);
+  assert.doesNotMatch(r.context, /notes\.md/);
+  hook("alice", "Stop", { session_id: "alice-p", last_assistant_message: "Done." });
+});
+
+await step("project paths: names starting with .. are inside, parent paths are not", () => {
+  const proj = join(root, "alice");
+  assert.equal(projectPath(join(proj, "..notes/todo.md"), proj), "..notes/todo.md");
+  assert.equal(projectPath(join(proj, "src/a.ts"), proj), "src/a.ts");
+  assert.equal(projectPath(join(root, "bob/src/a.ts"), proj), undefined);
+  assert.equal(projectPath(proj, proj), undefined);
 });
 
 await step("files outside the project are ignored", () => {
