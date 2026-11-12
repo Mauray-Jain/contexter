@@ -64,9 +64,11 @@ await step("install writes hooks, skill and project link", () => {
   for (const who of ["alice", "bob"]) {
     const out = cli(who, ["install", "code", "--workspace", slug]);
     assert.match(out, /claude mcp add --transport http .* contexter http\S+ --header "x-contexter-client: claude-code"/);
-    assert.deepEqual(Object.keys(installedHooks(who)).sort(), ["PreToolUse", "SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"]);
+    assert.deepEqual(Object.keys(installedHooks(who)).sort(),
+      ["PostToolUse", "PreToolUse", "SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"]);
     const settings = JSON.parse(readFileSync(join(root, who, ".claude/settings.json"), "utf8"));
     assert.equal(settings.hooks.PreToolUse[0].matcher, "Edit|Write|MultiEdit|NotebookEdit");
+    assert.equal(settings.hooks.PostToolUse[0].matcher, "Edit|Write|MultiEdit|NotebookEdit");
     assert.ok(readFileSync(join(root, who, ".claude/skills/contexter/SKILL.md"), "utf8").includes("name: contexter"));
     assert.equal(JSON.parse(readFileSync(join(root, who, ".contexter.json"), "utf8")).workspace, slug);
   }
@@ -116,8 +118,15 @@ await step("!private turns are not shared", () => {
   assert.doesNotMatch(r.context, /secret/);
 });
 
-const edit = (who: string, session: string, file: string) =>
-  hook(who, "PreToolUse", { session_id: session, tool_name: "Edit", tool_input: { file_path: join(root, who, file), old_string: "a", new_string: "b" } });
+// An approved edit: PreToolUse (checks), the tool runs, PostToolUse (records). Returns the check.
+const editInput = (who: string, session: string, file: string) =>
+  ({ session_id: session, tool_name: "Edit", tool_input: { file_path: join(root, who, file), old_string: "a", new_string: "b" } });
+const tryEdit = (who: string, session: string, file: string) => hook(who, "PreToolUse", editInput(who, session, file));
+const edit = (who: string, session: string, file: string) => {
+  const pre = tryEdit(who, session, file);
+  hook(who, "PostToolUse", { ...editInput(who, session, file), tool_response: { success: true } });
+  return pre;
+};
 
 await step("teammates see what alice is working on right now", () => {
   hook("alice", "UserPromptSubmit", { session_id: "alice-1", prompt: "Add retry logic to the MCP client when Supabase returns 503" });
@@ -182,6 +191,33 @@ await step("project paths: names starting with .. are inside, parent paths are n
   assert.equal(projectPath(join(proj, "src/a.ts"), proj), "src/a.ts");
   assert.equal(projectPath(join(root, "bob/src/a.ts"), proj), undefined);
   assert.equal(projectPath(proj, proj), undefined);
+});
+
+await step("a rejected edit doesn't claim the file", () => {
+  hook("alice", "SessionStart", { session_id: "alice-r", source: "startup" });
+  hook("alice", "UserPromptSubmit", { session_id: "alice-r", prompt: "Tidy the evaluation scripts" });
+  tryEdit("alice", "alice-r", "eval/run.py"); // the user said no: PostToolUse never fires
+  assert.equal(tryEdit("bob", "bob-2", "eval/run.py").context, "", "bob isn't told alice is on a file she never edited");
+  const r = hook("bob", "UserPromptSubmit", { session_id: "bob-2", prompt: "and alice?" });
+  assert.match(r.context, /alice is working on "Tidy the evaluation scripts"/);
+  assert.doesNotMatch(r.context, /eval\/run\.py/);
+});
+
+await step("a file warned about as a recent change still asks once a teammate starts editing it", () => {
+  edit("alice", "alice-r", "docs/guide.md");
+  const tr = transcript("alice", [{ user: "Tidy the guide", assistant: "Rewrote the guide intro.", wrote: "docs/guide.md" }]);
+  hook("alice", "Stop", { session_id: "alice-r", transcript_path: tr, stop_hook_active: false });
+  hook("bob", "SessionStart", { session_id: "bob-3", source: "startup" });
+  const first = edit("bob", "bob-3", "docs/guide.md");
+  assert.match(first.context, /alice's Claude changed docs\/guide\.md/);
+  assert.equal(first.output.permissionDecision, undefined);
+  hook("alice", "UserPromptSubmit", { session_id: "alice-r", prompt: "Add a troubleshooting section to the guide" });
+  edit("alice", "alice-r", "docs/guide.md");
+  const second = tryEdit("bob", "bob-3", "docs/guide.md");
+  assert.equal(second.output.permissionDecision, "ask", "a live conflict asks even after the earlier warning");
+  assert.match(second.context, /alice's Claude is editing docs\/guide\.md right now/);
+  assert.deepEqual(tryEdit("bob", "bob-3", "docs/guide.md").output, {}, "and only asks once");
+  hook("alice", "Stop", { session_id: "alice-r", last_assistant_message: "Added troubleshooting." });
 });
 
 await step("files outside the project are ignored", () => {

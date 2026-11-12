@@ -147,6 +147,11 @@ await step("chat: sync with user_request shows the task live and warns about dup
   assert.match(b.text, /alice is working on "Add an ablation table comparing reranker depth on MS MARCO"/);
   await A.call("post_turn", { user_request: "Add an ablation table comparing reranker depth on MS MARCO", summary: "Added Table 3: reranker depth ablation." });
   assert.doesNotMatch((await B.call("sync")).text, /alice is working on/, "post_turn finishes the task");
+  await A.call("sync", { user_request: "Rename the reranker variables in the method section" });
+  await A.call("sync"); // a !private turn: no user_request
+  const after = (await B.call("sync")).text;
+  assert.match(after, /alice is working on something private/);
+  assert.doesNotMatch(after, /Rename the reranker/, "the previous task doesn't stay live during a private turn");
 });
 
 await step("search, history and diff", async () => {

@@ -49,8 +49,10 @@ function buildServer(db: core.Db, userId: string, client: core.Client) {
         "The user's message in a sentence (verbatim if short). Omit if they started it with !private."),
     }),
   }, async ({ workspace, user_request }) => run(workspace, async (ctx) => {
+    // No request means a !private turn (or one Claude didn't describe): the previous task is over
+    // either way, so show this turn as private work rather than leaving the old task live.
     const request = user_request?.trim() ?? "";
-    if (request) await core.startTask(ctx, request);
+    await core.startTask(ctx, request || null);
     const [here, hint, overlap] = await Promise.all([
       core.presence(ctx), core.compactionHint(ctx), request ? core.overlapWarning(ctx, request) : "",
     ]);

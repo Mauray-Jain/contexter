@@ -2,7 +2,8 @@
 //   SessionStart      → team overview + shared memory + recent activity
 //   UserPromptSubmit  → post the prompt as this session's task, inject what teammates did since
 //                       the last message, what they're doing now, and any overlapping earlier work
-//   PreToolUse        → before Claude edits a file: record it, warn if a teammate is on it
+//   PreToolUse        → before Claude edits a file: warn if a teammate is on it
+//   PostToolUse       → after an edit went through: record the file on this session's task
 //   Stop              → post a summary of Claude's reply, mark the task finished
 //   SessionEnd        → close the session, release its locks
 // Hooks must never get in the way: every failure is logged and the hook exits 0
@@ -32,8 +33,12 @@ interface HookInput {
 const stateDir = join(home, "sessions");
 const statePath = (sid: string) => join(stateDir, `${sid.replace(/[^\w-]/g, "_")}.json`);
 
-// warned: files this session was already warned about (once per file per session).
-interface SessionState { workspace: string; session: string; private?: boolean; warned?: string[] }
+// warned: files this session was told a teammate recently changed (once per file per session).
+// confirmed: "<file> <handles>" pairs the user was already asked about because those teammates were
+// editing the file right now (asked again when someone else starts editing it).
+interface SessionState {
+  workspace: string; session: string; private?: boolean; warned?: string[]; confirmed?: string[];
+}
 
 function readState(sid: string): SessionState | null {
   try { return JSON.parse(readFileSync(statePath(sid), "utf8")); } catch { return null; }
@@ -172,26 +177,49 @@ async function stop(input: HookInput) {
   await core.postReply(c.ctx, { summary: summarize(text) || "(worked on files)", text, files });
 }
 
-// Before Claude edits a file: record it on this session's task (teammates see it live; not on
-// private turns) and, once per file per session, warn if a teammate is editing it now or changed it
-// recently. When someone is editing it right now, the user is asked to confirm the edit.
-async function preToolUse(input: HookInput) {
+// The file a file-editing tool call is about, relative to the project root.
+async function fileTool(input: HookInput) {
   const file = input.tool_input?.file_path ?? input.tool_input?.notebook_path;
-  if (typeof file !== "string") return;
-  const c = await context(input, { create: false });
-  if (!c) return;
+  if (typeof file !== "string") return null;
   const path = projectPath(file, input.cwd ?? process.cwd());
-  if (!path) return;
-  const { warn, activeBy } = await core.touchFile(c.ctx, path, !c.state.private);
-  const warned = c.state.warned ?? [];
-  if (!warn || warned.includes(path)) return;
-  writeState(input.session_id, { ...c.state, warned: [...warned, path].slice(-200) });
+  if (!path) return null;
+  const c = await context(input, { create: false });
+  return c ? { ...c, path } : null;
+}
+
+// Before Claude edits a file: warn if a teammate changed it recently (once per file per session) or
+// is editing it right now. In the second case the user is asked to confirm the edit (once per file
+// and set of teammates). Nothing is recorded yet: the edit may still be rejected.
+async function preToolUse(input: HookInput) {
+  const t = await fileTool(input);
+  if (!t) return;
+  const { state, path } = t;
+  const { warn, activeBy } = await core.touchFile(t.ctx, path, false);
+  if (!warn) return;
+  const warned = state.warned ?? [];
+  const confirmed = state.confirmed ?? [];
+  const conflict = activeBy.length ? `${path} ${[...activeBy].sort().join(",")}` : "";
+  const ask = conflict && !confirmed.includes(conflict);
+  if (!ask && warned.includes(path)) return;
+  writeState(input.session_id, {
+    ...state,
+    warned: warned.includes(path) ? warned : [...warned, path].slice(-200),
+    confirmed: ask ? [...confirmed, conflict].slice(-200) : confirmed,
+  });
   const out: Record<string, unknown> = { hookEventName: "PreToolUse", additionalContext: warn };
-  if (activeBy.length) {
+  if (ask) {
     out.permissionDecision = "ask";
     out.permissionDecisionReason = `contexter: ${activeBy.join(", ")} ${activeBy.length > 1 ? "are" : "is"} editing ${path} right now. Edit it anyway?`;
   }
   process.stdout.write(JSON.stringify({ hookSpecificOutput: out }));
+}
+
+// After an edit went through (PostToolUse only fires for tool calls that ran): record the file on
+// this session's task, so teammates see it live. Private turns don't publish their files.
+async function postToolUse(input: HookInput) {
+  const t = await fileTool(input);
+  if (!t || t.state.private) return;
+  await core.touchFile(t.ctx, t.path, true);
 }
 
 async function sessionEnd(input: HookInput) {
@@ -207,6 +235,7 @@ const handlers: Record<string, (i: HookInput) => Promise<void>> = {
   "session-start": sessionStart,
   "user-prompt-submit": userPromptSubmit,
   "pre-tool-use": preToolUse,
+  "post-tool-use": postToolUse,
   stop,
   "session-end": sessionEnd,
 };
@@ -214,12 +243,14 @@ export const HOOK_EVENTS = {
   SessionStart: "session-start",
   UserPromptSubmit: "user-prompt-submit",
   PreToolUse: "pre-tool-use",
+  PostToolUse: "post-tool-use",
   Stop: "stop",
   SessionEnd: "session-end",
 } as const;
 // Events that only fire for some tools: the file-editing tools.
 export const HOOK_MATCHERS: Partial<Record<keyof typeof HOOK_EVENTS, string>> = {
   PreToolUse: "Edit|Write|MultiEdit|NotebookEdit",
+  PostToolUse: "Edit|Write|MultiEdit|NotebookEdit",
 };
 
 export async function runHook(name: string) {
