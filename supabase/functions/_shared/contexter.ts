@@ -241,20 +241,69 @@ export async function listUnits(ctx: Ctx): Promise<Unit[]> {
     .order("collection").order("position", { nullsFirst: false }).order("key"));
 }
 
+interface SessionRow {
+  id: string;
+  user_id: string;
+  client: string;
+  title: string | null;
+  last_seen_at: string;
+  current_task: string | null;
+  task_started_at: string | null;
+  task_finished_at: string | null;
+  task_files: string[];
+}
+
+// Same rule as private.task_is_live: mid-task, and seen within the last hour.
+const TASK_LIVE_MS = 60 * 60_000;
+const isLive = (s: SessionRow) =>
+  !!s.task_started_at && !s.task_finished_at && Date.now() - new Date(s.last_seen_at).getTime() < TASK_LIVE_MS;
+
+const whoIs = (ctx: Pick<Ctx, "handles" | "userId">, userId: string) =>
+  userId === ctx.userId ? "you (another session)" : ctx.handles.get(userId) ?? "someone";
+
+const fileList = (files: string[], max = 5) =>
+  files.length ? ` · files: ${files.slice(-max).join(", ")}${files.length > max ? ` (+${files.length - max} more)` : ""}` : "";
+
+function taskLine(ctx: Ctx, s: SessionRow): string {
+  const who = whoIs(ctx, s.user_id);
+  const task = s.current_task ? `"${truncate(s.current_task, 200)}"` : "something private";
+  if (isLive(s)) return `${who} is working on ${task} (started ${ago(s.task_started_at!)}, ${s.client})${fileList(s.task_files)}`;
+  if (s.task_finished_at && s.current_task) {
+    return `${who} is active in ${s.client}; last finished ${task} ${ago(s.task_finished_at)}${fileList(s.task_files)}`;
+  }
+  return `${who} is active in ${s.client}${s.title ? ` ("${truncate(s.title, 60)}")` : ""}, seen ${ago(s.last_seen_at)}`;
+}
+
+// Open sessions other than the caller's that are mid-task or were seen in the last 15 minutes.
+async function otherSessions(ctx: Ctx): Promise<SessionRow[]> {
+  const since = new Date(Date.now() - TASK_LIVE_MS).toISOString();
+  const rows = unwrap(await ctx.db.from("sessions")
+    .select("id, user_id, client, title, last_seen_at, current_task, task_started_at, task_finished_at, task_files")
+    .eq("workspace_id", ctx.ws.id).is("ended_at", null).gt("last_seen_at", since)
+    .order("last_seen_at", { ascending: false })) as SessionRow[];
+  const recent = Date.now() - 15 * 60_000;
+  return rows.filter((s) => s.id !== ctx.session && (isLive(s) || new Date(s.last_seen_at).getTime() > recent));
+}
+
+// Teammates' tasks in progress right now, for the block injected before every message.
+export async function workInProgress(ctx: Ctx): Promise<string> {
+  const live = (await otherSessions(ctx)).filter(isLive);
+  if (!live.length) return "";
+  return [
+    `── in progress right now (${ctx.ws.slug}) ──`,
+    ...live.map((s) => `• ${taskLine(ctx, s)}`),
+    "Don't start the same work: if the user's request overlaps one of these, say so and suggest coordinating (mention).",
+    "──",
+  ].join("\n");
+}
+
 export async function presence(ctx: Ctx): Promise<string[]> {
-  const since = new Date(Date.now() - 15 * 60_000).toISOString();
   const [sessions, units] = await Promise.all([
-    ctx.db.from("sessions").select("id, user_id, client, title, last_seen_at, focus_unit")
-      .eq("workspace_id", ctx.ws.id).is("ended_at", null).gt("last_seen_at", since),
+    otherSessions(ctx),
     ctx.db.from("units").select("collection, key, lock_holder, lock_expires_at")
       .eq("workspace_id", ctx.ws.id).not("lock_holder", "is", null).gt("lock_expires_at", new Date().toISOString()),
   ]);
-  const lines: string[] = [];
-  for (const s of unwrap(sessions) as Any[]) {
-    if (s.id === ctx.session) continue;
-    const who = s.user_id === ctx.userId ? "you (another session)" : ctx.handles.get(s.user_id) ?? "someone";
-    lines.push(`${who} is active in ${s.client}${s.title ? ` ("${truncate(s.title, 60)}")` : ""}, seen ${ago(s.last_seen_at)}`);
-  }
+  const lines = sessions.map((s) => taskLine(ctx, s));
   for (const u of unwrap(units) as Any[]) {
     const who = u.lock_holder === ctx.userId ? "you" : ctx.handles.get(u.lock_holder) ?? "someone";
     lines.push(`${who} holds the lock on ${refOf(u)} until ${new Date(u.lock_expires_at).toISOString().slice(11, 16)} UTC`);
@@ -540,6 +589,79 @@ export async function postReply(ctx: Ctx, reply: { summary: string; text?: strin
   });
 }
 
+// ─────────────────────────────────────────────────────────────── work awareness
+
+// A task is one request in one session. null hides the text (a !private turn).
+export async function startTask(ctx: Ctx, task: string | null) {
+  if (!ctx.session) return;
+  unwrap(await ctx.db.rpc("start_task", { p_session: ctx.session, p_task: task }));
+}
+
+export async function finishTask(ctx: Ctx) {
+  if (!ctx.session) return;
+  unwrap(await ctx.db.rpc("finish_task", { p_session: ctx.session }));
+}
+
+// Earlier requests from other sessions that look like this one, as a warning block (or "").
+export async function overlapWarning(ctx: Ctx, text: string): Promise<string> {
+  const rows = unwrap(await ctx.db.rpc("find_overlap", {
+    p_workspace: ctx.ws.id, p_text: text, p_session: ctx.session ?? null,
+  })) as { author_id: string; session_id: string | null; kind: string; text: string; outcome: string | null;
+           files: string[]; created_at: string; score: number; active: boolean }[];
+  // One line per session: its closest match.
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  for (const r of rows) {
+    const key = r.session_id ?? `${r.author_id}:${r.created_at}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const who = whoIs(ctx, r.author_id);
+    const what = r.kind === "reply" ? `their Claude did: ${truncate(r.text, 200)}` : `asked "${truncate(r.text, 200)}"`;
+    const state = r.active ? " (still working on it)" : r.outcome ? ` → ${truncate(r.outcome, 200)}` : "";
+    const files = Array.isArray(r.files) && r.files.length ? ` [files: ${r.files.slice(0, 5).join(", ")}]` : "";
+    lines.push(`• ${who} · ${ago(r.created_at)} · ${what}${state}${files}`);
+  }
+  if (!lines.length) return "";
+  return [
+    "── possible duplicate work ──",
+    "This request looks like work a teammate already asked for or did:",
+    ...lines,
+    "Before doing it, tell the user about this overlap. If it's the same work, build on theirs (check the files, git log, " +
+    "or read_unit) instead of redoing it, or suggest coordinating with a mention. If it's clearly different, carry on.",
+    "──",
+  ].join("\n");
+}
+
+// About to change a file (path relative to the project root): record it on this session and
+// report teammates who are editing it now or changed it recently. warn is "" when nobody is.
+export async function touchFile(ctx: Ctx, path: string): Promise<{ warn: string; activeBy: string[] }> {
+  if (!ctx.session) return { warn: "", activeBy: [] };
+  const rows = unwrap(await ctx.db.rpc("touch_file", { p_session: ctx.session, p_path: path })) as
+    { author_id: string; session_id: string; task: string; touched_at: string; active: boolean }[];
+  const bySession = new Map<string, (typeof rows)[number]>();
+  for (const r of rows) {
+    const prev = bySession.get(r.session_id);
+    if (!prev || (r.active && !prev.active)) bySession.set(r.session_id, r);
+  }
+  const hits = [...bySession.values()];
+  if (!hits.length) return { warn: "", activeBy: [] };
+  const active = hits.filter((r) => r.active);
+  const lines = hits.map((r) => r.active
+    ? `• ${whoIs(ctx, r.author_id)}'s Claude is editing ${path} right now, for "${truncate(r.task, 200)}"`
+    : `• ${whoIs(ctx, r.author_id)}'s Claude changed ${path} ${ago(r.touched_at)}: ${truncate(r.task, 200)}`);
+  return {
+    activeBy: active.map((r) => whoIs(ctx, r.author_id)),
+    warn: [
+      `── teammates on ${path} ──`,
+      ...lines,
+      "Their changes are on their machine and may not be committed or pushed yet. Before editing: check git " +
+      "(git status / git log / git pull) so you build on their work instead of redoing or overwriting it." +
+      (active.length ? " Someone is editing it right now: tell the user and suggest coordinating (mention) before going ahead." : ""),
+      "──",
+    ].join("\n"),
+  };
+}
+
 export async function mention(ctx: Ctx, to: string[], text: string) {
   const known = new Set(ctx.handles.values());
   const bad = to.filter((h) => !known.has(h));
@@ -577,7 +699,8 @@ export async function exportMarkdown(ctx: Ctx, opts: { collection?: string; with
 // ─────────────────────────────────────────────────────────────── instructions
 
 export const CHAT_RULES = `You are working in a shared contexter workspace. Several people, each with their own Claude, work in it together, and contexter makes it feel like one shared conversation.
-- At the start of every reply, call contexter's sync tool. Weave anything relevant from teammates into your answer (mention who did what) and answer anything addressed to this user.
+- At the start of every reply, call contexter's sync tool with user_request set to the user's message in a sentence. Weave anything relevant from teammates into your answer (mention who did what) and answer anything addressed to this user.
+- Never redo a teammate's work: if sync reports possible duplicate work or a teammate is working on the same thing right now, tell the user before starting and build on their work or coordinate with a mention.
 - Read and change shared content only through contexter tools (read_unit, write_unit, create_unit, set_status). Always pass expected_version; on a version conflict, merge, never overwrite.
 - Explain the why: pass reasoning to write_unit, and call record for decisions, findings, rejected alternatives and open questions.
 - Claim a unit before a long edit and release it after. Respect other people's locks.

@@ -29,8 +29,8 @@ function hook(who: string, event: string, input: Record<string, unknown>) {
     input: JSON.stringify({ hook_event_name: event, cwd: join(root, who), ...input }), encoding: "utf8",
     cwd: join(root, who), env: { ...process.env, CONTEXTER_HOME: join(root, who, ".home") },
   });
-  const context = r.stdout ? JSON.parse(r.stdout).hookSpecificOutput?.additionalContext ?? "" : "";
-  return { status: r.status, context, ms: Date.now() - started, stderr: r.stderr };
+  const output = r.stdout ? JSON.parse(r.stdout).hookSpecificOutput ?? {} : {};
+  return { status: r.status, context: output.additionalContext ?? "", output, ms: Date.now() - started, stderr: r.stderr };
 }
 
 function transcript(who: string, turns: { user: string; assistant: string; wrote?: string }[]) {
@@ -63,7 +63,9 @@ await step("install writes hooks, skill and project link", () => {
   for (const who of ["alice", "bob"]) {
     const out = cli(who, ["install", "code", "--workspace", slug]);
     assert.match(out, /claude mcp add --transport http .* contexter http\S+ --header "x-contexter-client: claude-code"/);
-    assert.deepEqual(Object.keys(installedHooks(who)).sort(), ["SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"]);
+    assert.deepEqual(Object.keys(installedHooks(who)).sort(), ["PreToolUse", "SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"]);
+    const settings = JSON.parse(readFileSync(join(root, who, ".claude/settings.json"), "utf8"));
+    assert.equal(settings.hooks.PreToolUse[0].matcher, "Edit|Write|MultiEdit|NotebookEdit");
     assert.ok(readFileSync(join(root, who, ".claude/skills/contexter/SKILL.md"), "utf8").includes("name: contexter"));
     assert.equal(JSON.parse(readFileSync(join(root, who, ".contexter.json"), "utf8")).workspace, slug);
   }
@@ -111,6 +113,61 @@ await step("!private turns are not shared", () => {
   hook("alice", "Stop", { session_id: "alice-1", last_assistant_message: "Here is the secret plan." });
   const r = hook("bob", "UserPromptSubmit", { session_id: "bob-1", prompt: "anything new?" });
   assert.doesNotMatch(r.context, /secret/);
+});
+
+const edit = (who: string, session: string, file: string) =>
+  hook(who, "PreToolUse", { session_id: session, tool_name: "Edit", tool_input: { file_path: join(root, who, file), old_string: "a", new_string: "b" } });
+
+await step("teammates see what alice is working on right now", () => {
+  hook("alice", "UserPromptSubmit", { session_id: "alice-1", prompt: "Add retry logic to the MCP client when Supabase returns 503" });
+  const r = hook("bob", "UserPromptSubmit", { session_id: "bob-1", prompt: "anything going on?" });
+  assert.match(r.context, /── in progress right now/);
+  assert.match(r.context, /alice is working on "Add retry logic to the MCP client when Supabase returns 503" \(started just now, claude-code\)/);
+});
+
+await step("a request that repeats a teammate's work gets a duplicate warning", () => {
+  const r = hook("bob", "UserPromptSubmit", { session_id: "bob-1", prompt: "add retry logic for 503 responses in the MCP client" });
+  assert.match(r.context, /── possible duplicate work ──/);
+  assert.match(r.context, /alice · just now · asked "Add retry logic to the MCP client when Supabase returns 503" \(still working on it\)/);
+  assert.ok(r.context.indexOf("possible duplicate work") < r.context.indexOf("in progress right now"), "warning comes first");
+});
+
+await step("an unrelated request gets no duplicate warning", () => {
+  const r = hook("bob", "UserPromptSubmit", { session_id: "bob-1", prompt: "write the conclusion about future datasets and limitations" });
+  assert.doesNotMatch(r.context, /possible duplicate work/);
+});
+
+await step("editing a file a teammate is editing right now asks the user first, once", () => {
+  assert.equal(edit("alice", "alice-1", "src/client.ts").context, "", "nobody else is on it yet");
+  const r = edit("bob", "bob-1", "src/client.ts");
+  assert.equal(r.status, 0);
+  assert.equal(r.output.permissionDecision, "ask");
+  assert.match(r.output.permissionDecisionReason, /alice is editing src\/client\.ts right now/);
+  assert.match(r.context, /alice's Claude is editing src\/client\.ts right now, for "Add retry logic/);
+  assert.match(r.context, /git status/);
+  assert.deepEqual(edit("bob", "bob-1", "src/client.ts").output, {}, "warned once per file per session");
+  const other = hook("bob", "UserPromptSubmit", { session_id: "bob-1", prompt: "status?" });
+  assert.match(other.context, /alice is working on "Add retry logic.*files: src\/client\.ts/);
+});
+
+await step("after alice finishes, a recent change is a warning without a prompt", () => {
+  const t = transcript("alice", [{ user: "Add retry logic", assistant: "Added retries with backoff to the MCP client for 503s.", wrote: "src/client.ts" }]);
+  hook("alice", "Stop", { session_id: "alice-1", transcript_path: t, stop_hook_active: false });
+  hook("bob", "SessionStart", { session_id: "bob-2", source: "startup" });
+  const r = edit("bob", "bob-2", "src/client.ts");
+  assert.equal(r.output.permissionDecision, undefined);
+  assert.match(r.context, /alice's Claude changed src\/client\.ts just now: Added retries with backoff/);
+  // bob-1 hasn't read alice's reply yet (bob-2 started with the backlog marked read).
+  const p = hook("bob", "UserPromptSubmit", { session_id: "bob-1", prompt: "what's new?" });
+  assert.doesNotMatch(p.context, /alice is working on/);
+  assert.match(p.context, /Added retries with backoff to the MCP client for 503s\. \[files: src\/client\.ts\]/,
+    "reply files are relative to the project root");
+});
+
+await step("files outside the project are ignored", () => {
+  const r = hook("bob", "PreToolUse", { session_id: "bob-2", tool_name: "Write", tool_input: { file_path: "/etc/hosts", content: "x" } });
+  assert.equal(r.status, 0);
+  assert.deepEqual(r.output, {});
 });
 
 await step("same member, other client: alice's chat sees her own Code session", async () => {

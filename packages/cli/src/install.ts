@@ -6,7 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CliError } from "./client.ts";
 import { loadConfig } from "./config.ts";
-import { HOOK_EVENTS } from "./hooks.ts";
+import { HOOK_EVENTS, HOOK_MATCHERS } from "./hooks.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // Works both from src/ (tsx) and dist/ (bundle): the repo root is three levels up from either.
@@ -55,8 +55,10 @@ export function installCode(opts: { scope: "user" | "project"; workspace?: strin
   // CONTEXTER_HOME is pinned so hooks use this machine's sign-in even if Claude Code's env differs.
   const envPrefix = process.env.CONTEXTER_HOME ? `CONTEXTER_HOME="${process.env.CONTEXTER_HOME}" ` : "";
   for (const [event, name] of Object.entries(HOOK_EVENTS)) {
+    const matcher = HOOK_MATCHERS[event as keyof typeof HOOK_EVENTS];
     settings.hooks[event] ??= [];
     settings.hooks[event].push({
+      ...(matcher ? { matcher } : {}),
       hooks: [{ type: "command", command: `${envPrefix}"${process.execPath}" "${bundle}" hook ${name}`, timeout: 20 }],
     });
   }

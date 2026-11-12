@@ -1,7 +1,7 @@
 -- Access model + concurrency tests for the core schema. Run: npx supabase test db
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(38);
+select plan(46);
 
 -- Three people: alice (owner), bob (editor via invite), carol (viewer via invite), eve (outsider).
 insert into auth.users (id, email) values
@@ -146,6 +146,47 @@ select ok(exists(select 1 from public.search_workspace((select id from public.wo
 -- profiles: can't point the default at a workspace you're not in
 select throws_ok($$ insert into public.profiles (active_workspace) values (gen_random_uuid()) $$, null, null,
   'default workspace must be one you belong to');
+reset role;
+
+-- ── work awareness: tasks, file activity, overlapping requests
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000a');
+create temp table asess as
+  select (public.ensure_session((select id from public.workspaces), 'claude-code', 'alice code', 'alice-ext')).id;
+grant select on asess to authenticated;
+reset role;
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000b');
+create temp table bsess as
+  select (public.ensure_session((select id from public.workspaces), 'claude-code', 'bob code', 'bob-ext')).id;
+grant select on bsess to authenticated;
+select lives_ok($$ select public.start_task((select id from bsess), 'Rewrite the results table with the new reranker runs') $$,
+  'members start tasks on their own session');
+select throws_ok($$ select public.start_task((select id from asess), 'hijack') $$, 'P0002', null,
+  'nobody can set the task of someone else''s session');
+select is((select count(*)::int from public.touch_file((select id from bsess), 'tables/results.tex')), 0,
+  'the first member on a file sees nobody else');
+insert into public.events (workspace_id, session_id, kind, payload)
+  select id, (select id from bsess), 'prompt', '{"text":"Rewrite the results table with the new reranker runs"}' from public.workspaces;
+reset role;
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000a');
+select ok((select active from public.touch_file((select id from asess), 'tables/results.tex') limit 1),
+  'a teammate mid-task on the same file is reported as active');
+select ok(exists(select 1 from public.find_overlap((select id from public.workspaces),
+  'update the results table using the reranker runs', (select id from asess)) where active),
+  'an overlapping request finds the teammate''s live task');
+select is((select count(*)::int from public.find_overlap((select id from public.workspaces),
+  'draft the conclusion about future datasets', (select id from asess))), 0,
+  'an unrelated request finds nothing');
+reset role;
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000b');
+select public.finish_task((select id from bsess));
+reset role;
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000a');
+select ok(not (select active from public.touch_file((select id from asess), 'tables/results.tex') limit 1) is true,
+  'a finished task is no longer active on the file');
+reset role;
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000e');
+select throws_ok($$ select * from public.find_overlap((select id from public.workspaces limit 1), 'anything at all here') $$,
+  null, null, 'outsiders can''t search for overlaps');
 reset role;
 
 select * from finish();

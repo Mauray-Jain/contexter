@@ -1,12 +1,14 @@
 // Claude Code hooks: the automatic half of the "one shared chat" illusion.
 //   SessionStart      → team overview + shared memory + recent activity
-//   UserPromptSubmit  → post the prompt, inject what teammates did since the last message
-//   Stop              → post a summary of Claude's reply
+//   UserPromptSubmit  → post the prompt as this session's task, inject what teammates did since
+//                       the last message, what they're doing now, and any overlapping earlier work
+//   PreToolUse        → before Claude edits a file: record it, warn if a teammate is on it
+//   Stop              → post a summary of Claude's reply, mark the task finished
 //   SessionEnd        → close the session, release its locks
 // Hooks must never get in the way: every failure is logged and the hook exits 0
 // (exit 2 on UserPromptSubmit would block the user's prompt).
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import * as core from "../../../supabase/functions/_shared/contexter.ts";
 import { getClient, requireUser } from "./client.ts";
 import { home, loadConfig } from "./config.ts";
@@ -23,12 +25,15 @@ interface HookInput {
   stop_hook_active?: boolean;
   last_assistant_message?: string;
   reason?: string;
+  tool_name?: string;
+  tool_input?: Record<string, unknown>;
 }
 
 const stateDir = join(home, "sessions");
 const statePath = (sid: string) => join(stateDir, `${sid.replace(/[^\w-]/g, "_")}.json`);
 
-interface SessionState { workspace: string; session: string; private?: boolean }
+// warned: files this session was already warned about (once per file per session).
+interface SessionState { workspace: string; session: string; private?: boolean; warned?: string[] }
 
 function readState(sid: string): SessionState | null {
   try { return JSON.parse(readFileSync(statePath(sid), "utf8")); } catch { return null; }
@@ -38,17 +43,31 @@ function writeState(sid: string, s: SessionState) {
   writeFileSync(statePath(sid), JSON.stringify(s), { mode: 0o600 });
 }
 
+// The folder holding .contexter.json: the project root every member's paths are relative to.
+export function projectRoot(cwd: string): string | undefined {
+  for (let dir = cwd; ; dir = dirname(dir)) {
+    if (existsSync(join(dir, ".contexter.json"))) return dir;
+    if (dirname(dir) === dir) return undefined;
+  }
+}
+
 // Which workspace a project belongs to: a .contexter.json in the project (or a parent),
 // then CONTEXTER_WORKSPACE, then the CLI's active workspace.
 export function projectWorkspace(cwd: string): string | undefined {
-  for (let dir = cwd; ; dir = dirname(dir)) {
-    const f = join(dir, ".contexter.json");
-    if (existsSync(f)) {
-      try { return JSON.parse(readFileSync(f, "utf8")).workspace; } catch { return undefined; }
-    }
-    if (dirname(dir) === dir) break;
+  const root = projectRoot(cwd);
+  if (root) {
+    try { return JSON.parse(readFileSync(join(root, ".contexter.json"), "utf8")).workspace; } catch { return undefined; }
   }
   return process.env.CONTEXTER_WORKSPACE ?? loadConfig().activeWorkspace?.slug;
+}
+
+// A file path as teammates see it: relative to the project root (or cwd), with / separators.
+// undefined for files outside the project, which other machines can't share anyway.
+export function projectPath(file: string, cwd: string): string | undefined {
+  const root = projectRoot(cwd) ?? cwd;
+  const rel = relative(root, isAbsolute(file) ? file : join(cwd, file));
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) return undefined;
+  return rel.split(sep).join("/");
 }
 
 function emit(event: string, context: string) {
@@ -94,11 +113,14 @@ async function userPromptSubmit(input: HookInput) {
   const prompt = input.prompt ?? "";
   const isPrivate = /^\s*!private\b/i.test(prompt);
   writeState(input.session_id, { ...state, private: isPrivate });
-  if (!isPrivate && prompt.trim()) await core.postPrompt(ctx, prompt);
-  const [delta, hint] = await Promise.all([core.feedDelta(ctx), core.compactionHint(ctx)]);
+  const shared = !isPrivate && prompt.trim() ? prompt : "";
+  await Promise.all([shared ? core.postPrompt(ctx, shared) : null, core.startTask(ctx, shared || null)]);
+  const [delta, now, overlap, hint] = await Promise.all([
+    core.feedDelta(ctx), core.workInProgress(ctx), shared ? core.overlapWarning(ctx, shared) : "", core.compactionHint(ctx),
+  ]);
   emit("UserPromptSubmit", [
     isPrivate ? "[contexter] This message is private: it is not shared with the team. Don't post it." : "",
-    delta, hint,
+    overlap, delta, now, hint,
   ].filter(Boolean).join("\n\n"));
 }
 
@@ -138,14 +160,38 @@ export function summarize(text: string): string {
 async function stop(input: HookInput) {
   if (input.stop_hook_active) return;
   const c = await context(input, { create: false });
-  if (!c || c.state.private) return;
+  if (!c) return;
+  await core.finishTask(c.ctx);
+  if (c.state.private) return;
   const turn = input.transcript_path && existsSync(input.transcript_path)
     ? lastTurn(input.transcript_path) : { text: "", files: [] };
   const text = input.last_assistant_message || turn.text;
   if (!text.trim() && !turn.files.length) return;
-  const cwd = input.cwd ?? "";
-  const files = turn.files.map((f) => (cwd && f.startsWith(`${cwd}/`) ? f.slice(cwd.length + 1) : f));
+  const cwd = input.cwd ?? process.cwd();
+  const files = turn.files.map((f) => projectPath(f, cwd) ?? f);
   await core.postReply(c.ctx, { summary: summarize(text) || "(worked on files)", text, files });
+}
+
+// Before Claude edits a file: record it on this session's task (teammates see it live) and, once
+// per file per session, warn if a teammate is editing it now or changed it recently. When someone
+// is editing it right now, the user is asked to confirm the edit.
+async function preToolUse(input: HookInput) {
+  const file = input.tool_input?.file_path ?? input.tool_input?.notebook_path;
+  if (typeof file !== "string") return;
+  const c = await context(input, { create: false });
+  if (!c) return;
+  const path = projectPath(file, input.cwd ?? process.cwd());
+  if (!path) return;
+  const { warn, activeBy } = await core.touchFile(c.ctx, path);
+  const warned = c.state.warned ?? [];
+  if (!warn || warned.includes(path)) return;
+  writeState(input.session_id, { ...c.state, warned: [...warned, path].slice(-200) });
+  const out: Record<string, unknown> = { hookEventName: "PreToolUse", additionalContext: warn };
+  if (activeBy.length) {
+    out.permissionDecision = "ask";
+    out.permissionDecisionReason = `contexter: ${activeBy.join(", ")} ${activeBy.length > 1 ? "are" : "is"} editing ${path} right now. Edit it anyway?`;
+  }
+  process.stdout.write(JSON.stringify({ hookSpecificOutput: out }));
 }
 
 async function sessionEnd(input: HookInput) {
@@ -160,15 +206,21 @@ async function sessionEnd(input: HookInput) {
 const handlers: Record<string, (i: HookInput) => Promise<void>> = {
   "session-start": sessionStart,
   "user-prompt-submit": userPromptSubmit,
+  "pre-tool-use": preToolUse,
   stop,
   "session-end": sessionEnd,
 };
 export const HOOK_EVENTS = {
   SessionStart: "session-start",
   UserPromptSubmit: "user-prompt-submit",
+  PreToolUse: "pre-tool-use",
   Stop: "stop",
   SessionEnd: "session-end",
 } as const;
+// Events that only fire for some tools: the file-editing tools.
+export const HOOK_MATCHERS: Partial<Record<keyof typeof HOOK_EVENTS, string>> = {
+  PreToolUse: "Edit|Write|MultiEdit|NotebookEdit",
+};
 
 export async function runHook(name: string) {
   try {
