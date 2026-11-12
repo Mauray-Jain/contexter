@@ -1,0 +1,41 @@
+# Publishes web/ (consent page + dashboard) to GitHub Pages.
+# Needs repository variables SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY, and Pages set to
+# "GitHub Actions" in the repo settings. The publishable key is public by design.
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths: [web/**, .github/workflows/pages.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    if: vars.SUPABASE_URL != ''
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Write config.js
+        run: |
+          printf 'window.CONTEXTER = %s;\n' \
+            "$(jq -n --arg url "$SUPABASE_URL" --arg key "$SUPABASE_PUBLISHABLE_KEY" '{url: $url, key: $key}')" > web/config.js
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+      - id: deploy
+        uses: actions/deploy-pages@v4

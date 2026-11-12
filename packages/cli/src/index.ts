@@ -1,9 +1,13 @@
-#!/usr/bin/env -S npx tsx
+#!/usr/bin/env node
 import { Command, Option } from "commander";
 import { check, CliError, getClient, requireUser, requireWorkspace } from "./client.ts";
 import { loadConfig, saveConfig } from "./config.ts";
 import { loginWithEmail, loginWithGithub } from "./auth.ts";
 import { templates } from "./templates.ts";
+import * as core from "../../../supabase/functions/_shared/contexter.ts";
+import { runHook } from "./hooks.ts";
+import { chatInstructions, installCode, packageSkill, uninstallCode } from "./install.ts";
+import { cliCtx, exportWorkspace, mirror, watch } from "./workspace.ts";
 
 const program = new Command("contexter")
   .description("Shared context and reasoning for teams using Claude on separate accounts");
@@ -57,6 +61,7 @@ program.command("init")
       check(await sb.from("units").insert(tpl.units.map((u) => ({ ...u, workspace_id: ws.id }))));
     }
     saveConfig({ activeWorkspace: { id: ws.id, slug: ws.slug } });
+    await core.setActiveWorkspace(sb, (await requireUser(sb)).id, ws.id);
     console.log(`Created workspace "${ws.slug}" from template ${template} (${tpl.units.length} units). It's now active.`);
     console.log("Invite teammates with: contexter invite");
   });
@@ -88,8 +93,13 @@ program.command("join")
     const ws = check(await sb.rpc("join_workspace", { p_code: code, p_handle: handle })
       .single<{ id: string; slug: string }>());
     saveConfig({ activeWorkspace: { id: ws.id, slug: ws.slug } });
+    await core.setActiveWorkspace(sb, (await requireUser(sb)).id, ws.id);
     console.log(`Joined "${ws.slug}" as ${handle}. It's now active.`);
   });
+
+program.command("templates").description("List workspace templates").action(() => {
+  for (const [name, t] of Object.entries(templates)) console.log(`${name.padEnd(16)} ${t.description}`);
+});
 
 program.command("workspaces").description("List your workspaces").action(async () => {
   const sb = getClient();
@@ -108,10 +118,11 @@ program.command("use")
   .argument("<slug>")
   .action(async (slug) => {
     const sb = getClient();
-    await requireUser(sb);
+    const user = await requireUser(sb);
     const ws = check(await sb.from("workspaces").select("id, slug").eq("slug", slug).maybeSingle());
     if (!ws) throw new CliError(`No workspace "${slug}" that you're a member of`);
     saveConfig({ activeWorkspace: ws as { id: string; slug: string } });
+    await core.setActiveWorkspace(sb, user.id, (ws as { id: string }).id);
     console.log(`Active workspace: ${slug}`);
   });
 
@@ -138,35 +149,57 @@ program.command("status").description("Members, units and locks in the active wo
 
 program.command("feed")
   .description("Show teammates' activity since you last looked (advances your cursor)")
-  .option("--limit <n>", "max events", "100")
-  .action(async ({ limit }) => {
-    const sb = getClient();
-    await requireUser(sb);
-    const ws = requireWorkspace();
-    const [events, members] = await Promise.all([
-      sb.rpc("pull_feed", { p_workspace: ws.id, p_limit: Number(limit) }),
-      sb.from("members").select("user_id, handle").eq("workspace_id", ws.id),
-    ]);
-    const handles = new Map((check(members) as any[]).map((m) => [m.user_id, m.handle]));
-    const rows = check(events) as any[];
-    if (!rows.length) return console.log("Nothing new from your teammates.");
-    for (const e of rows) {
-      const who = handles.get(e.author_id) ?? "someone";
-      const when = new Date(e.created_at).toLocaleString();
-      console.log(`• ${who} · ${when} · ${e.kind}: ${describe(e)}`);
-    }
+  .action(async () => {
+    const out = await core.feedDelta(await cliCtx());
+    console.log(out || "Nothing new from your teammates.");
   });
 
-function describe(e: { kind: string; payload: any }): string {
-  const p = e.payload ?? {};
-  switch (e.kind) {
-    case "edit": return `${p.collection}/${p.key} v${p.from}→v${p.to}: ${p.summary}`;
-    case "lock": return `${p.action} ${p.collection ? `${p.collection}/${p.key}` : p.unit}${p.reason ? ` (${p.reason})` : ""}`;
-    case "record": return `${p.type} #${p.number}: ${p.title}`;
-    case "member": return `${p.handle} ${p.action} the workspace`;
-    default: return JSON.stringify(p);
-  }
-}
+program.command("memory").description("Show the team's shared memory and everything since").action(async () => {
+  console.log(await core.memoryContext(await cliCtx()));
+});
+
+program.command("search").description("Search units, reasoning and the feed").argument("<query...>")
+  .action(async (query: string[]) => console.log(await core.search(await cliCtx(), query.join(" "))));
+
+program.command("why").description("Explain a unit or record from its reasoning and history")
+  .argument("<target>", "unit ref (sections/method), record ref (D-0007) or a question")
+  .action(async (target) => console.log(await core.why(await cliCtx(), target)));
+
+program.command("export")
+  .description("Export the workspace (ordered units) with pandoc")
+  .addOption(new Option("--format <format>").choices(["md", "pdf", "docx", "html", "tex", "epub"]).default("md"))
+  .option("--collection <name>", "only this collection (research-paper defaults to sections)")
+  .option("--with-reasoning", "append the reasoning record as an appendix")
+  .option("-o, --out <file>")
+  .action(async (opts) => console.log(`Wrote ${await exportWorkspace(opts)}`));
+
+program.command("mirror")
+  .description("Back up the workspace as files in a git repo (units, records, memory)")
+  .argument("<dir>")
+  .action(async (dir) => console.log(await mirror(dir)));
+
+program.command("watch")
+  .description("Live team feed in this terminal")
+  .option("--notify", "also show desktop notifications")
+  .action(async (opts) => watch(opts));
+
+const install = program.command("install").description("Connect Claude to contexter");
+install.command("code")
+  .description("Claude Code: hooks (automatic sync every message) + skill")
+  .addOption(new Option("--scope <scope>").choices(["user", "project"]).default("project"))
+  .option("--workspace <slug>", "link this folder to a workspace (project scope)")
+  .action((opts) => console.log(installCode({ ...opts, cwd: process.cwd() })));
+install.command("chat")
+  .description("Claude chat (desktop/web/mobile): package the skill and print connector steps")
+  .option("-o, --out <file>", "where to write the skill zip", "contexter-skill.zip")
+  .action(({ out }) => console.log(chatInstructions(packageSkill(out))));
+program.command("uninstall").description("Remove contexter hooks and skill from Claude Code")
+  .addOption(new Option("--scope <scope>").choices(["user", "project"]).default("project"))
+  .action((opts) => console.log(uninstallCode({ ...opts, cwd: process.cwd() })));
+
+program.command("hook", { hidden: true })
+  .argument("<event>", "session-start | user-prompt-submit | stop | session-end")
+  .action((event) => runHook(event));
 
 program.parseAsync().catch((err) => {
   console.error(err instanceof CliError ? `error: ${err.message}` : err);

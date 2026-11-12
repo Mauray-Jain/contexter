@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Authorize contexter</title>
+  <link rel="stylesheet" href="../../style.css">
+  <script src="../../config.js"></script>
+</head>
+<body>
+<main id="main"><p class="muted">Loading…</p></main>
+<script type="module">
+  // Supabase Auth's OAuth 2.1 server sends MCP clients (Claude chat, Claude Code) here to get
+  // the user's approval before issuing tokens.
+  import { el, requireSignIn, sb, signOut } from "../../app.js";
+
+  const main = document.getElementById("main");
+  const id = new URLSearchParams(location.search).get("authorization_id");
+  const fail = (msg) => main.replaceChildren(el("section", { class: "card narrow" }, el("h1", {}, "Can't authorize"), el("p", {}, msg)));
+
+  if (!id) {
+    fail("This page is opened by an app asking to connect to contexter. The link is missing its authorization id.");
+  } else {
+    const user = await requireSignIn(main, {
+      title: "Sign in to connect",
+      note: "An app wants to connect to your contexter workspaces. Sign in first.",
+    });
+    const { data, error } = await sb.auth.oauth.getAuthorizationDetails(id);
+    if (error) {
+      fail(error.message);
+    } else if (!data.authorization_id && data.redirect_url) {
+      location.replace(data.redirect_url); // already approved earlier
+    } else {
+      const scopes = (data.scope || "").split(" ").filter(Boolean);
+      const decide = async (approve) => {
+        main.querySelectorAll("button").forEach((b) => (b.disabled = true));
+        const res = approve ? await sb.auth.oauth.approveAuthorization(id) : await sb.auth.oauth.denyAuthorization(id);
+        if (res.error) return fail(res.error.message);
+        location.replace(res.data.redirect_url);
+      };
+      main.replaceChildren(el("section", { class: "card narrow" },
+        el("h1", {}, `Connect ${data.client.name || "this app"}?`),
+        el("p", {}, `${data.client.name || "An app"} wants to use contexter as `, el("strong", {}, user.email || "you"),
+          ". It will be able to read and write in every workspace you belong to, with your permissions."),
+        el("p", { class: "muted" }, `It will send you back to ${new URL(data.redirect_uri).host}.`),
+        scopes.length ? el("ul", { class: "scopes" }, scopes.map((s) => el("li", {}, s))) : null,
+        el("div", { class: "actions" },
+          el("button", { type: "button", onclick: () => signOut() }, "Not you?"),
+          el("button", { type: "button", class: "danger", onclick: () => decide(false) }, "Deny"),
+          el("button", { type: "button", class: "primary", onclick: () => decide(true) }, "Approve")),
+      ));
+    }
+  }
+</script>
+</body>
+</html>

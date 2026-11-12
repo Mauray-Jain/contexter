@@ -14,6 +14,8 @@ export function getClient(): SupabaseClient {
 }
 
 export async function requireUser(sb: SupabaseClient) {
+  // getSession refreshes an expired access token from the stored refresh token.
+  await sb.auth.getSession();
   const { data, error } = await sb.auth.getUser();
   if (error || !data.user) throw new CliError("Not signed in. Run: contexter login");
   return data.user;

@@ -1,14 +1,14 @@
 -- Access model + concurrency tests for the core schema. Run: npx supabase test db
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(24);
+select plan(37);
 
 -- Three people: alice (owner), bob (editor via invite), carol (viewer via invite), eve (outsider).
 insert into auth.users (id, email) values
-  ('00000000-0000-0000-0000-00000000000a', 'alice@test.local'),
-  ('00000000-0000-0000-0000-00000000000b', 'bob@test.local'),
-  ('00000000-0000-0000-0000-00000000000c', 'carol@test.local'),
-  ('00000000-0000-0000-0000-00000000000e', 'eve@test.local');
+  ('00000000-0000-0000-0000-00000000000a', 'alice@pgtap.local'),
+  ('00000000-0000-0000-0000-00000000000b', 'bob@pgtap.local'),
+  ('00000000-0000-0000-0000-00000000000c', 'carol@pgtap.local'),
+  ('00000000-0000-0000-0000-00000000000e', 'eve@pgtap.local');
 
 create function pg_temp.act_as(uid uuid) returns void language plpgsql as $$
 begin
@@ -100,6 +100,49 @@ select ok((select count(*) from public.pull_feed((select id from public.workspac
   'pull_feed returns teammates'' events');
 select is((select count(*)::int from public.pull_feed((select id from public.workspaces))), 0,
   'second pull returns nothing new (cursor advanced)');
+reset role;
+
+
+-- ── live collaboration (migration 2)
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000b');
+create temp table sess as select (public.ensure_session((select id from public.workspaces), 'claude-code', 'bob code', 'claude-1')).id as id;
+grant select on sess to authenticated;
+select is((public.ensure_session((select id from public.workspaces), 'claude-code', null, 'claude-1')).id, (select id from sess),
+  'same external id reuses the session');
+select isnt((public.ensure_session((select id from public.workspaces), 'claude-chat')).id, (select id from sess),
+  'chat gets its own session');
+select is((public.ensure_session((select id from public.workspaces), 'claude-chat')).id,
+          (select id from public.sessions where client = 'claude-chat' and user_id = '00000000-0000-0000-0000-00000000000b'),
+  'chat session is reused within the window');
+-- bob's lock was broken by alice; bob claims sections/intro-style unit via his code session, then ends it
+insert into public.units (workspace_id, collection, key) select id, 'sections', 'results' from public.workspaces;
+select lives_ok($$ select public.claim_unit((select id from public.units where key = 'results'), (select id from sess)) $$,
+  'claim with a session');
+select lives_ok($$ select public.end_session((select id from sess)) $$, 'end session');
+select is((select lock_holder from public.units where key = 'results'), null, 'ending a session releases its locks');
+-- feed across own sessions: bob's code-session events are visible to bob's chat session
+insert into public.events (workspace_id, session_id, author_id, kind, payload)
+  select id, (select id from sess), '00000000-0000-0000-0000-00000000000b', 'prompt', '{"text":"from code"}' from public.workspaces;
+select ok(exists(select 1 from public.pull_feed((select id from public.workspaces), 100,
+  (select id from public.sessions where client = 'claude-chat' and user_id = '00000000-0000-0000-0000-00000000000b'))
+  where payload->>'text' = 'from code'), 'own events from another session show up in this session''s feed');
+-- status trigger
+update public.units set status = 'drafting' where key = 'results';
+select ok(exists(select 1 from public.events where kind = 'status' and payload->>'to' = 'drafting'),
+  'status changes are announced');
+-- shared memory
+select throws_ok($$ select public.compact_memory((select id from public.workspaces), 'too short', 1) $$, '22023', null,
+  'tiny summaries are rejected');
+select is((public.compact_memory((select id from public.workspaces), 'The team set up the paper and drafted the method section.', 5)).version,
+  1, 'compaction creates memory v1');
+select is((select covers_up_to_event from public.memory_status((select id from public.workspaces))), 5::bigint,
+  'memory_status reports coverage');
+-- search
+select ok(exists(select 1 from public.search_workspace((select id from public.workspaces), 'text') where kind = 'unit'),
+  'search finds unit content');
+-- profiles: can't point the default at a workspace you're not in
+select throws_ok($$ insert into public.profiles (active_workspace) values (gen_random_uuid()) $$, null, null,
+  'default workspace must be one you belong to');
 reset role;
 
 select * from finish();

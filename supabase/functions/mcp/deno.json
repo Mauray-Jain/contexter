@@ -1,0 +1,9 @@
+{
+  "imports": {
+    "@modelcontextprotocol/server": "npm:@modelcontextprotocol/server@2.3.1",
+    "@supabase/middleware": "npm:@supabase/middleware@1.0.0",
+    "@supabase/server": "npm:@supabase/server@1.9.2",
+    "zod": "npm:zod@4.6.7",
+    "zod/v4": "npm:zod@4.6.7/v4"
+  }
+}

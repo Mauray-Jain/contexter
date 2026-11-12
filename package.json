@@ -6,15 +6,25 @@
     "packages/*"
   ],
   "scripts": {
-    "typecheck": "tsc -b packages/cli",
+    "typecheck": "tsc -p packages/cli",
     "db:start": "supabase start",
     "db:stop": "supabase stop",
     "db:reset": "supabase db reset",
     "db:test": "supabase test db",
     "ctx": "tsx packages/cli/src/index.ts",
-    "test:e2e": "scripts/e2e-local.sh"
+    "test:e2e": "scripts/e2e-local.sh",
+    "db:keys": "node scripts/gen-keys.mjs",
+    "test:mcp": "tsx scripts/mcp-test.ts",
+    "build": "node scripts/build.mjs",
+    "test:hooks": "tsx scripts/hooks-test.ts",
+    "web": "node scripts/serve-web.mjs",
+    "test:oauth": "tsx scripts/oauth-test.ts",
+    "seed": "tsx scripts/seed-demo.ts",
+    "test:cli": "tsx scripts/cli-test.ts",
+    "test": "npm run build && supabase test db && npm run test:mcp && npm run test:oauth && npm run test:hooks && npm run test:cli && npm run test:e2e"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "^2.3.1",
     "@types/node": "26.6.5",
     "supabase": "2.121.0",
     "tsx": "4.23.15",

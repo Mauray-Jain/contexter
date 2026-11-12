@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>contexter</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="config.js"></script>
+</head>
+<body>
+<main id="main"><p class="muted">Loading…</p></main>
+<dialog id="unit"><h1 id="unit-title"></h1><p id="unit-meta" class="muted"></p><pre id="unit-body"></pre>
+  <div class="actions"><button type="button" onclick="this.closest('dialog').close()">Close</button></div></dialog>
+<script type="module">
+  // Live team dashboard: feed, presence, units and reasoning, updated through Supabase Realtime.
+  import { ago, el, requireSignIn, sb, signOut } from "./app.js";
+
+  const main = document.getElementById("main");
+  const user = await requireSignIn(main);
+  const LETTER = { decision: "D", rationale: "R", alternative: "A", finding: "F", question: "Q", session: "S" };
+  const recRef = (r) => `${LETTER[r.type]}-${String(r.number).padStart(4, "0")}`;
+
+  const { data: memberships } = await sb.from("members").select("handle, workspaces(id, slug, name)").eq("user_id", user.id);
+  if (!memberships?.length) {
+    main.replaceChildren(el("section", { class: "card narrow" }, el("h1", {}, "No workspaces yet"),
+      el("p", {}, "Create one with ", el("code", {}, "contexter init"), " or join with an invite code: ", el("code", {}, "contexter join <code>")),
+      el("button", { type: "button", onclick: signOut }, "Sign out")));
+    throw new Error("no workspaces");
+  }
+  const { data: profile } = await sb.from("profiles").select("active_workspace").eq("user_id", user.id).maybeSingle();
+  const pick = new URLSearchParams(location.search).get("w");
+  let ws = (memberships.find((m) => m.workspaces.slug === pick) ?? memberships.find((m) => m.workspaces.id === profile?.active_workspace) ?? memberships[0]).workspaces;
+
+  const feedList = el("ul", { class: "feed", "aria-live": "polite" });
+  const presenceList = el("ul", { class: "plain" });
+  const unitsBody = el("tbody");
+  const questions = el("ul", { class: "plain" });
+  const decisions = el("ul", { class: "plain" });
+  const memory = el("p", { class: "muted" });
+  let handles = new Map();
+  let myHandle = "";
+  let channel;
+
+  const select = el("select", { "aria-label": "Workspace", onchange: (e) => {
+    ws = memberships.find((m) => m.workspaces.slug === e.target.value).workspaces;
+    history.replaceState(null, "", `?w=${ws.slug}`);
+    load();
+  } }, memberships.map((m) => el("option", { value: m.workspaces.slug, selected: m.workspaces.id === ws.id }, m.workspaces.name)));
+
+  main.replaceChildren(
+    el("header", { class: "bar" }, el("h1", {}, "contexter"), select, el("span", { class: "spacer" }),
+      el("span", { class: "muted" }, user.email), el("button", { type: "button", onclick: signOut }, "Sign out")),
+    el("div", { class: "grid" },
+      el("section", { class: "card" }, el("h2", {}, "Team feed"), feedList),
+      el("div", { class: "stack" },
+        el("section", { class: "card" }, el("h2", {}, "Right now"), presenceList),
+        el("section", { class: "card" }, el("h2", {}, "Units"),
+          el("table", {}, el("thead", {}, el("tr", {}, el("th", {}, "Unit"), el("th", {}, "Status"), el("th", {}, "Ver"), el("th", {}, "Lock"))), unitsBody)),
+        el("section", { class: "card" }, el("h2", {}, "Open questions"), questions),
+        el("section", { class: "card" }, el("h2", {}, "Decisions"), decisions),
+        el("section", { class: "card" }, el("h2", {}, "Team memory"), memory))));
+
+  function describe(e) {
+    const p = e.payload ?? {};
+    const unit = p.collection ? `${p.collection}/${p.key}` : "a unit";
+    switch (e.kind) {
+      case "prompt": return `asked: “${p.text}”`;
+      case "reply": return `→ their Claude: ${p.summary || p.text || ""}${p.files?.length ? ` [${p.files.slice(0, 4).join(", ")}]` : ""}`;
+      case "edit": return `edited ${unit} (v${p.from}→v${p.to}): ${p.summary}`;
+      case "record": return `recorded ${recRef(p)} ${p.type}: ${p.title}`;
+      case "status": return p.action === "created" ? `created ${unit}` : `moved ${unit} ${p.from} → ${p.to}`;
+      case "lock": return p.action === "claimed" ? `is editing ${unit}` : p.action === "broken" ? `broke the lock on ${unit}` : `released ${unit}`;
+      case "mention": return `to ${(e.mentions ?? []).map((h) => "@" + h).join(" ")}: “${p.text}”`;
+      case "member": return `${p.action} the workspace`;
+      case "presence": return p.action === "started" ? `opened a ${p.client} session` : `closed their ${p.client} session`;
+      case "compaction": return `updated the team memory (v${p.version})`;
+      default: return e.kind;
+    }
+  }
+
+  function feedItem(e, fresh = false) {
+    const mine = e.author_id === user.id;
+    const cls = [(e.mentions ?? []).includes(myHandle) ? "mention" : "", fresh ? "new" : ""].join(" ").trim();
+    return el("li", { class: cls || null },
+      el("span", { class: "who" }, mine ? "you" : handles.get(e.author_id) ?? "someone"), " ",
+      describe(e), " ", el("span", { class: "when", title: e.created_at }, ago(e.created_at)));
+  }
+
+  async function openUnit(u) {
+    const { data } = await sb.from("unit_versions").select("content, summary, author_id, created_at").eq("unit_id", u.id).eq("version", u.current_version).maybeSingle();
+    document.getElementById("unit-title").textContent = `${u.collection}/${u.key}`;
+    document.getElementById("unit-meta").textContent = data
+      ? `v${u.current_version} · ${u.status} · last change by ${handles.get(data.author_id) ?? "?"} ${ago(data.created_at)}: ${data.summary}`
+      : "No content yet.";
+    document.getElementById("unit-body").textContent = data?.content ?? "";
+    document.getElementById("unit").showModal();
+  }
+
+  async function refreshSide() {
+    const now = new Date().toISOString();
+    const [units, sessions, recs, mem] = await Promise.all([
+      sb.from("units").select("*").eq("workspace_id", ws.id).order("collection").order("position", { nullsFirst: false }).order("key"),
+      sb.from("sessions").select("user_id, client, title, last_seen_at").eq("workspace_id", ws.id).is("ended_at", null)
+        .gt("last_seen_at", new Date(Date.now() - 15 * 60_000).toISOString()).order("last_seen_at", { ascending: false }),
+      sb.from("records").select("type, number, title, status").eq("workspace_id", ws.id).in("type", ["question", "decision"]).order("number", { ascending: false }),
+      sb.rpc("memory_status", { p_workspace: ws.id }).single(),
+    ]);
+    unitsBody.replaceChildren(...(units.data ?? []).map((u) => el("tr", {},
+      el("td", { class: "ref" }, el("button", { type: "button", onclick: () => openUnit(u) }, `${u.collection}/${u.key}`)),
+      el("td", {}, el("span", { class: "pill" }, u.status)), el("td", {}, `v${u.current_version}`),
+      el("td", {}, u.lock_holder && u.lock_expires_at > now ? `🔒 ${handles.get(u.lock_holder) ?? "?"}` : ""))));
+    presenceList.replaceChildren(...((sessions.data ?? []).length
+      ? sessions.data.map((s) => el("li", {}, el("span", { class: "dot", "aria-hidden": "true" }),
+          `${s.user_id === user.id ? "you" : handles.get(s.user_id) ?? "someone"} in ${s.client}${s.title ? ` (${s.title})` : ""} · ${ago(s.last_seen_at)}`))
+      : [el("li", { class: "muted" }, "Nobody active in the last 15 minutes.")]));
+    const qs = (recs.data ?? []).filter((r) => r.type === "question" && r.status === "open");
+    const ds = (recs.data ?? []).filter((r) => r.type === "decision").slice(0, 8);
+    questions.replaceChildren(...(qs.length ? qs.map((r) => el("li", {}, `${recRef(r)} ${r.title}`)) : [el("li", { class: "muted" }, "None open.")]));
+    decisions.replaceChildren(...(ds.length ? ds.map((r) => el("li", {}, `${recRef(r)} ${r.title} `, el("span", { class: "pill" }, r.status))) : [el("li", { class: "muted" }, "None yet.")]));
+    memory.textContent = mem.data?.summary ?? "No summary yet. Claude writes one once the feed gets long.";
+  }
+
+  async function load() {
+    const { data: members } = await sb.from("members").select("user_id, handle").eq("workspace_id", ws.id);
+    handles = new Map((members ?? []).map((m) => [m.user_id, m.handle]));
+    myHandle = handles.get(user.id) ?? "";
+    const { data: events } = await sb.from("events").select("*").eq("workspace_id", ws.id)
+      .neq("kind", "presence").order("id", { ascending: false }).limit(60);
+    feedList.replaceChildren(...(events ?? []).map((e) => feedItem(e)));
+    if (!events?.length) feedList.append(el("li", { class: "muted" }, "Nothing yet."));
+    await refreshSide();
+
+    if (channel) await sb.removeChannel(channel);
+    channel = sb.channel(`dash-${ws.id}`)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "events", filter: `workspace_id=eq.${ws.id}` }, ({ new: e }) => {
+        if (e.kind !== "presence") feedList.prepend(feedItem(e, true));
+        refreshSide();
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "units", filter: `workspace_id=eq.${ws.id}` }, refreshSide)
+      .subscribe();
+  }
+
+  await load();
+  setInterval(refreshSide, 60_000); // keeps "x minutes ago" and presence honest
+</script>
+</body>
+</html>

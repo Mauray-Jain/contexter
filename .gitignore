@@ -5,3 +5,5 @@ dist/
 .env.*
 supabase/.branches
 supabase/.temp
+supabase/signing_keys.json
+web/config.js

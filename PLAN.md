@@ -241,12 +241,12 @@ member's Claude sees the same structure and rules.
 | Phase | Deliverable | Done when |
 |---|---|---|
 | 0. Backend ✅ | Supabase project, schema, RLS, RPC functions, auth; CLI `login/init/invite/join` | Three accounts join one workspace; RLS blocks outsiders |
-| 1. Remote MCP server | Edge Function, MCP OAuth via Supabase Auth, all tools, `feed_delta` on every response | Connector added in claude.ai *and* Claude Code; A writes a unit, B's `sync()` shows it with reasoning |
-| 2. Code hooks | SessionStart / UserPromptSubmit / Stop / SessionEnd via local CLI | **The illusion:** A asks something in the Code tab; B's *next message* already knows about it |
-| 3. Chat | contexter skill, write safety net, prompts/resources, dashboard | A member on web or mobile chat and a Code member see each other's turns |
-| 4. Memory + presence | compaction flow, presence, `@mentions`, `!private` | A fresh session a week later starts with an accurate team summary |
-| 5. Templates + export | `research-paper`, `blank`, pandoc export, git mirror | Your paper exports to PDF from the workspace |
-| 6. Polish | notifications, web viewer of feed/units, pgvector search, more templates | As needed |
+| 1. Remote MCP server ✅ | Edge Function, MCP OAuth via Supabase Auth, all tools, `feed_delta` on every response | Connector added in claude.ai *and* Claude Code; A writes a unit, B's `sync()` shows it with reasoning |
+| 2. Code hooks ✅ | SessionStart / UserPromptSubmit / Stop / SessionEnd via local CLI | **The illusion:** A asks something in the Code tab; B's *next message* already knows about it |
+| 3. Chat ✅ | contexter skill, write safety net, prompts/resources, dashboard | A member on web or mobile chat and a Code member see each other's turns |
+| 4. Memory + presence ✅ | compaction flow, presence, `@mentions`, `!private` | A fresh session a week later starts with an accurate team summary |
+| 5. Templates + export ✅ | `research-paper`, `blank`, pandoc export, git mirror | Your paper exports to PDF from the workspace |
+| 6. Polish (mostly ✅: notifications, dashboard, full-text search, all templates; pgvector not done) | notifications, web viewer of feed/units, pgvector search, more templates | As needed |
 
 ## 10. Open decisions
 1. **Supabase hosting:** hosted free tier (recommended to start; 3 users is tiny) or self-hosted.
