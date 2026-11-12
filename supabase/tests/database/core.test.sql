@@ -1,7 +1,7 @@
 -- Access model + concurrency tests for the core schema. Run: npx supabase test db
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(37);
+select plan(38);
 
 -- Three people: alice (owner), bob (editor via invite), carol (viewer via invite), eve (outsider).
 insert into auth.users (id, email) values
@@ -30,6 +30,9 @@ insert into public.invites (workspace_id, role, max_uses)
 insert into public.invites (workspace_id, role, code)
   select id, 'viewer', 'viewer-code' from public.workspaces where slug = 'paper';
 select is((select count(*)::int from public.invites), 2, 'owner can create invites');
+
+select matches((select code from public.invites where role = 'editor'), '^[0-9a-f]{18}$',
+  'invite codes are plain hex (never start with a dash)');
 
 -- stash the editor code where other roles can't read it
 create temp table codes as select code from public.invites where role = 'editor';
