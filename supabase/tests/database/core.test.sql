@@ -201,7 +201,7 @@ select public.start_task((select id from bsess2), 'Summarize the related work on
 insert into public.events (workspace_id, session_id, kind, payload)
   select id, (select id from bsess2), 'prompt', '{"text":"Summarize the related work on dense retrieval"}' from public.workspaces;
 insert into public.events (workspace_id, session_id, kind, payload)
-  select id, (select id from bsess2), 'reply', '{"summary":"Summarized the related work."}' from public.workspaces;
+  select id, (select id from bsess2), 'reply', '{"summary":"Wrote up the prior literature section."}' from public.workspaces;
 select public.finish_task((select id from bsess2));
 select public.start_task((select id from bsess2), 'Fix typos in the abstract wording');
 insert into public.events (workspace_id, session_id, kind, payload)
@@ -216,7 +216,7 @@ create temp table hist2 as
    where kind = 'prompt';
 select is((select outcome from hist), null, 'an interrupted request doesn''t borrow a later turn''s outcome');
 select is((select active from hist), false, 'an old request isn''t "still being worked on" because its session has a new task');
-select is((select outcome from hist2), 'Summarized the related work.', 'a finished request shows its own outcome');
+select is((select outcome from hist2), 'Wrote up the prior literature section.', 'a finished request shows its own outcome');
 select is((select count(*)::int from public.find_overlap((select id from public.workspaces), 'fix the typos in abstract wording', (select id from asess))
             where active), 1, 'the current task matches as live, once per session');
 reset role;
