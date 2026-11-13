@@ -3,7 +3,7 @@
 // Run: npm run build && npm run test:hooks (with `npm run db:start` up).
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CLI, cliRunner } from "./lib/cli.ts";
@@ -325,11 +325,16 @@ await step("a background command's run closes itself when Claude Code says the c
   const secret = join(root, "alice", "secret.txt");
   writeFileSync(secret, "API_KEY=do-not-share\n");
   const leak = start("toolu_d", "task_d", "./leak.sh");
-  for (const file of [secret, join(tasks, "secret.output"), join(root, "alice", "task_d.output")]) writeFileSync(file, "API_KEY=do-not-share\n");
-  assert.match(notify("task_d", "toolu_d", "completed", "completed (exit code 0)", secret).context, new RegExp(`Run #${leak} ended`));
-  const leaked = await core.getRun(ctx, leak);
-  assert.equal(leaked.progress, null);
-  assert.equal(leaked.log_tail, null);
+  for (const file of [join(tasks, "secret.output"), join(root, "alice", "task_d.output")]) writeFileSync(file, "API_KEY=do-not-share\n");
+  symlinkSync(secret, output("task_d")); // the expected name, but a link to another file
+  assert.match(notify("task_d", "toolu_d", "completed", "completed (exit code 0)").context, new RegExp(`Run #${leak} ended`));
+  const leak2 = start("toolu_e", "task_e", "./leak2.sh");
+  assert.match(notify("task_e", "toolu_e", "completed", "completed (exit code 0)", secret).context, new RegExp(`Run #${leak2} ended`));
+  for (const n of [leak, leak2]) {
+    const leaked = await core.getRun(ctx, n);
+    assert.equal(leaked.progress, null);
+    assert.equal(leaked.log_tail, null);
+  }
   // Every closed run's entries are gone; the one Claude reported itself (c) too.
   assert.deepEqual(readdirSync(bg), []);
   hook("alice", "Stop", { session_id: "alice-bg2", last_assistant_message: "Started them." });

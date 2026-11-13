@@ -12,7 +12,7 @@
 // Hooks must never get in the way: every failure is logged and the hook exits 0
 // (exit 2 on UserPromptSubmit would block the user's prompt).
 import {
-  appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, rmSync, writeFileSync,
+  appendFileSync, closeSync, constants as fsConstants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, rmSync, writeFileSync,
 } from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
@@ -82,10 +82,13 @@ function forgetBgRun(sid: string, run: BgRun) {
 }
 
 // The end of a file, without reading all of it: background jobs can write gigabytes of output.
+// A symbolic link is refused (O_NOFOLLOW), so the path can't be pointed at another file.
 export function readTail(path: string, bytes: number): string {
-  const fd = openSync(path, "r");
+  const fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
   try {
-    const size = fstatSync(fd).size;
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) throw new Error(`${path} is not a regular file`);
+    const size = stat.size;
     const buf = Buffer.alloc(Math.min(size, bytes));
     readSync(fd, buf, 0, buf.length, size - buf.length);
     return buf.toString("utf8");
@@ -236,10 +239,11 @@ async function closeBackgroundRuns(ctx: core.Ctx, sid: string, prompt: string, i
         const file = isPrivate ? undefined : trustedOutputFile(n.outputFile, run);
         if (file) tail = readTail(file, 16_384).replace(/\s*\[exited with code -?\d+\]\s*$/, "\n").slice(-4000);
       } catch { /* output already gone */ }
-      await core.updateRun(ctx, run.id, {
+      const saved = await core.updateRun(ctx, run.id, {
         status: n.status, exitCode: n.exitCode, logTail: tail || undefined, progress: lastLine(tail) || undefined,
       });
-      lines.push(`[contexter] Run #${run.number} ended (${n.status}${n.exitCode != null ? `, exit ${n.exitCode}` : ""}) ` +
+      // Say what was recorded: another report of the end may have got there first.
+      lines.push(`[contexter] Run #${run.number} ended (${saved.status}${saved.exit_code != null ? `, exit ${saved.exit_code}` : ""}) ` +
         "and is reported to the team; no need to call update_run for it.");
     }
     forgetBgRun(sid, run);
