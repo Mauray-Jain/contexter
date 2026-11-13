@@ -12,10 +12,11 @@
 // Hooks must never get in the way: every failure is logged and the hook exits 0
 // (exit 2 on UserPromptSubmit would block the user's prompt).
 import {
-  appendFileSync, closeSync, constants as fsConstants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, rmSync, writeFileSync,
+  appendFileSync, closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync,
+  realpathSync, rmSync, writeFileSync,
 } from "node:fs";
 import { hostname } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, normalize, relative, sep } from "node:path";
 import * as core from "../../../supabase/functions/_shared/contexter.ts";
 import { getClient, requireUser } from "./client.ts";
 import { home, loadConfig } from "./config.ts";
@@ -81,13 +82,17 @@ function forgetBgRun(sid: string, run: BgRun) {
   for (const k of run.keys) rmSync(bgPath(sid, k), { force: true });
 }
 
-// The end of a file, without reading all of it: background jobs can write gigabytes of output.
-// A symbolic link is refused (O_NOFOLLOW), so the path can't be pointed at another file.
+// The end of a regular file, without reading all of it: background jobs can write gigabytes of output.
+// Nothing along the path may be a symbolic link (its real path must be itself), the open neither
+// follows a link nor blocks (a FIFO), and the file opened must be the one checked.
 export function readTail(path: string, bytes: number): string {
-  const fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  if (realpathSync(path) !== path) throw new Error(`${path} goes through a symbolic link`);
+  const before = lstatSync(path);
+  if (!before.isFile()) throw new Error(`${path} is not a regular file`);
+  const fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
   try {
     const stat = fstatSync(fd);
-    if (!stat.isFile()) throw new Error(`${path} is not a regular file`);
+    if (!stat.isFile() || stat.ino !== before.ino || stat.dev !== before.dev) throw new Error(`${path} changed while opening`);
     const size = stat.size;
     const buf = Buffer.alloc(Math.min(size, bytes));
     readSync(fd, buf, 0, buf.length, size - buf.length);
@@ -214,10 +219,12 @@ export function parseTaskNotifications(prompt: string) {
   });
 }
 
-// The output file Claude Code wrote for one of this run's background tasks: <tasks folder>/<task id>.output.
-// Anything else named in a notification is not read: a prompt can claim any path, and the tail is shared.
-export function trustedOutputFile(path: string | undefined, run: { keys: string[] }): string | undefined {
-  if (!path || !isAbsolute(path) || basename(dirname(path)) !== "tasks") return undefined;
+// The output file Claude Code wrote for one of this run's background tasks:
+// <…>/<session id>/tasks/<task id>.output. Anything else named in a notification is not read: a prompt
+// can claim any path, and the tail is shared. readTail then refuses links and anything not a regular file.
+export function trustedOutputFile(path: string | undefined, sid: string, run: { keys: string[] }): string | undefined {
+  if (!path || !isAbsolute(path) || normalize(path) !== path) return undefined;
+  if (basename(dirname(path)) !== "tasks" || basename(dirname(dirname(path))) !== sid) return undefined;
   const m = /^(.+)\.output$/.exec(basename(path));
   return m && run.keys.includes(m[1]) ? path : undefined;
 }
@@ -236,7 +243,7 @@ async function closeBackgroundRuns(ctx: core.Ctx, sid: string, prompt: string, i
       let tail = "";
       // Claude Code ends the output file with its own "[exited with code N]" line: not the job's output.
       try {
-        const file = isPrivate ? undefined : trustedOutputFile(n.outputFile, run);
+        const file = isPrivate ? undefined : trustedOutputFile(n.outputFile, sid, run);
         if (file) tail = readTail(file, 16_384).replace(/\s*\[exited with code -?\d+\]\s*$/, "\n").slice(-4000);
       } catch { /* output already gone */ }
       const saved = await core.updateRun(ctx, run.id, {

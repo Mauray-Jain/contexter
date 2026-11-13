@@ -3,7 +3,9 @@
 // Run: npm run build && npm run test:hooks (with `npm run db:start` up).
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CLI, cliRunner } from "./lib/cli.ts";
@@ -273,7 +275,7 @@ await step("a background command Claude starts becomes a run the team sees", () 
 
 await step("a background command's run closes itself when Claude Code says the command ended", async () => {
   // Claude Code writes a background task's output to <tasks folder>/<task id>.output.
-  const tasks = join(root, "alice", "tasks");
+  const tasks = join(realpathSync(root), "alice", "alice-bg2", "tasks");
   mkdirSync(tasks, { recursive: true });
   const output = (taskId: string) => join(tasks, `${taskId}.output`);
   writeFileSync(output("task_a"), "warming up\nrps 500 ok\np99 41ms\n\n[exited with code 3]\n");
@@ -327,10 +329,19 @@ await step("a background command's run closes itself when Claude Code says the c
   const leak = start("toolu_d", "task_d", "./leak.sh");
   for (const file of [join(tasks, "secret.output"), join(root, "alice", "task_d.output")]) writeFileSync(file, "API_KEY=do-not-share\n");
   symlinkSync(secret, output("task_d")); // the expected name, but a link to another file
+  // …or the expected name in a folder reached through a link.
+  const linked = join(realpathSync(root), "alice", "linked");
+  mkdirSync(join(linked, "real"), { recursive: true });
+  writeFileSync(join(linked, "real", "task_f.output"), "API_KEY=do-not-share\n");
+  mkdirSync(join(linked, "alice-bg2"));
+  symlinkSync(join(linked, "real"), join(linked, "alice-bg2", "tasks"));
+  const leak3 = start("toolu_f", "task_f", "./leak3.sh");
+  assert.match(notify("task_f", "toolu_f", "completed", "completed (exit code 0)", join(linked, "alice-bg2", "tasks", "task_f.output")).context,
+    new RegExp(`Run #${leak3} ended`));
   assert.match(notify("task_d", "toolu_d", "completed", "completed (exit code 0)").context, new RegExp(`Run #${leak} ended`));
   const leak2 = start("toolu_e", "task_e", "./leak2.sh");
   assert.match(notify("task_e", "toolu_e", "completed", "completed (exit code 0)", secret).context, new RegExp(`Run #${leak2} ended`));
-  for (const n of [leak, leak2]) {
+  for (const n of [leak, leak2, leak3]) {
     const leaked = await core.getRun(ctx, n);
     assert.equal(leaked.progress, null);
     assert.equal(leaked.log_tail, null);
