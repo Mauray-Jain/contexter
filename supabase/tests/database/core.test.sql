@@ -1,7 +1,7 @@
 -- Access model + concurrency tests for the core schema. Run: npx supabase test db
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(54);
+select plan(74);
 
 -- Three people: alice (owner), bob (editor via invite), carol (viewer via invite), eve (outsider).
 insert into auth.users (id, email) values
@@ -248,6 +248,74 @@ select ok(not private.task_is_live((select s from public.sessions s where id = (
 update public.sessions set client = 'claude-code' where id = (select id from bsess2);
 select ok(private.task_is_live((select s from public.sessions s where id = (select id from bsess2))),
   'a Claude Code task stays live for up to an hour');
+
+-- ── runs: writers start them, watchers hear when they end, outsiders see nothing
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000c');
+select throws_ok($$ select public.start_run((select id from public.workspaces), 'carol job') $$,
+  '42501', null, 'viewers cannot start runs');
+reset role;
+
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000b');
+create temp table run1 as
+  select * from public.start_run((select id from public.workspaces), 'stress test', 'watermax', './stress.sh',
+                                 null, array['alice'], 'wrapper');
+select is((select number from run1), 1, 'runs are numbered per workspace');
+select is((select mentions from public.events where kind = 'run' and payload->>'action' = 'started'),
+  array['alice'], 'starting a run mentions its watchers');
+select throws_ok($$ select public.start_run((select id from public.workspaces), 'x', null, null, null, array['nobody']) $$,
+  'P0002', null, 'unknown watcher handles are rejected');
+select public.update_run((select id from run1), null, 'step 10/100', 'line 1\nstep 10/100');
+select is((select count(*)::int from public.events where kind = 'run'), 1, 'a heartbeat posts nothing to the feed');
+select is((select progress from public.runs where id = (select id from run1)), 'step 10/100', 'a heartbeat stores progress');
+select public.update_run((select id from run1), 'failed', 'Killed', null, 137);
+select public.update_run((select id from run1), 'succeeded');
+select is((select count(*)::int from public.events where kind = 'run' and payload->>'action' = 'finished'), 1,
+  'the end of a run is announced once');
+select is((select status || ' ' || exit_code from public.runs where id = (select id from run1)), 'failed 137',
+  'a finished run keeps its first final status');
+select is((select mentions from public.events where kind = 'run' and payload->>'action' = 'finished'),
+  array['alice'], 'the end of a run mentions its watchers');
+select public.watch_run((select id from run1), array['carol']);
+select is((select mentions from public.events where kind = 'run' and payload->>'action' = 'shared'),
+  array['carol'], 'sharing a run mentions the new watcher');
+reset role;
+
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000e');
+select is((select count(*)::int from public.runs), 0, 'outsiders see no runs');
+select is((select count(*)::int from public.run_watchers), 0, 'outsiders see no run watchers');
+reset role;
+
+-- ── handoffs: the recipient watches the sender's running jobs at once and takes their locks on accepting
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000b');
+create temp table run2 as select * from public.start_run((select id from public.workspaces), 'training', 'watermax');
+select public.claim_unit((select id from public.units where key = 'results'));
+create temp table h1 as
+  select * from public.create_handoff((select id from public.workspaces), 'alice', 'Finish the results',
+                                      'Stress test is running; results section half done.', 'Check run 2, then write it up.',
+                                      array['sections/results']);
+select throws_ok($$ select public.create_handoff((select id from public.workspaces), 'bob', 'x', 'yyy') $$,
+  '22023', null, 'you cannot hand off to yourself');
+reset role;
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000a');
+select ok(exists (select 1 from public.run_watchers where run_id = (select id from run2)
+                   and user_id = '00000000-0000-0000-0000-00000000000a'),
+  'the recipient watches the sender''s running runs as soon as it''s handed off');
+select is((select mentions from public.events where kind = 'handoff' and payload->>'action' = 'created'),
+  array['alice'], 'a handoff mentions its recipient');
+reset role;
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000c');
+select throws_ok($$ select public.resolve_handoff((select id from h1), 'accepted') $$,
+  null, null, 'someone else cannot take a handoff addressed to a teammate');
+reset role;
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000a');
+select is((public.resolve_handoff((select id from h1), 'accepted')).status, 'accepted', 'the recipient accepts');
+select is((select lock_holder from public.units where key = 'results'), '00000000-0000-0000-0000-00000000000a'::uuid,
+  'accepting moves the sender''s unit locks to the recipient');
+select is((select mentions from public.events where kind = 'handoff' and payload->>'action' = 'accepted'),
+  array['bob'], 'accepting tells the sender');
+select throws_ok($$ select public.resolve_handoff((select id from h1), 'declined') $$,
+  'P0001', null, 'a resolved handoff cannot be resolved again');
+reset role;
 
 select * from finish();
 rollback;

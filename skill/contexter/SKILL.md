@@ -71,6 +71,35 @@ The team wants the *why* kept, not just the text. Use `record` for:
 Use `why` to explain why something is the way it is before changing it, and `update_record` to
 accept decisions, resolve questions or mark records superseded.
 
+## Runs: long jobs the team should see
+
+A **run** is a long job: a training run, a stress test on a shared machine, a benchmark, a sweep.
+Everyone sees running jobs in the **"runs"** block before each message, with progress and how
+long ago each one reported.
+
+- When the user starts a long job, have it run under `contexter run -- <command>` (add
+  `--title "…"` and `--watch <handles>`). That registers it, passes its output through, and reports
+  progress, log tail and exit code by itself, with a heartbeat every minute.
+- If it can't be wrapped, register it with `start_run` and call `update_run` when you learn how it
+  went (status `succeeded` / `failed` / `cancelled`, `exit_code`, a one-line `progress`). In Claude
+  Code, background commands are registered automatically; you'll be told the run number.
+- `watch_run` makes teammates follow a run ("let Krish keep an eye on it"): they're told now and
+  again when it ends. Pass `watchers` to `start_run` for the same thing up front.
+- **NO HEARTBEAT** on a `contexter run` job means the job or its machine probably died. Say so.
+  Raise failed runs the user started or watches. `runs` with a `run` number gives the log tail.
+
+## Handoffs: passing work on
+
+When the user has to stop with work unfinished (for example their usage limit is about to run
+out), offer to call `handoff`: `to` a teammate (or nobody, for anyone), a `title`, a `summary`
+someone with none of this conversation can act on (goal, what's done, decisions, what's in
+progress), `next_steps`, and the `files` involved. The teammate starts watching the user's running
+jobs right away, and takes over their unit locks when they accept.
+
+A **"handed to you"** block means a teammate handed work to this user. Bring it up first. If the
+user wants it, `resolve_handoff` with `accept` and carry on from the next steps (check the files
+and `git log` for the latest state); otherwise `decline`.
+
 ## Team memory
 
 When contexter says the shared memory is behind, finish the user's request first, then call

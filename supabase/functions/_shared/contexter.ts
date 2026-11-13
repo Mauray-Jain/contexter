@@ -90,10 +90,18 @@ export const recordRef = (r: { type: string; number: number }) =>
 
 function ago(iso: string): string {
   const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
-  if (s < 60) return "just now";
-  if (s < 3600) return `${Math.round(s / 60)}m ago`;
-  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
-  return `${Math.round(s / 86400)}d ago`;
+  return s < 60 ? "just now" : `${duration(s)} ago`;
+}
+
+function duration(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.round(s / 60)}m`;
+  if (s < 86400) {
+    const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60);
+    return m && h < 10 ? `${h}h${m}m` : `${h}h`;
+  }
+  return `${Math.round(s / 86400)}d`;
 }
 
 // @handles in text that belong to this workspace.
@@ -180,6 +188,27 @@ export function describeEvent(e: Event, ctx: Pick<Ctx, "handles" | "userId">): s
     case "member": what = `${p.action} the workspace`; break;
     case "presence": what = p.action === "started" ? `opened a ${p.client} session` : `closed their ${p.client} session`; break;
     case "compaction": what = `updated the shared memory (v${p.version})`; break;
+    case "run": {
+      const run = `run #${p.number} "${truncate(p.title ?? "", 120)}"${p.host ? ` on ${p.host}` : ""}`;
+      const to = (e.mentions ?? []).map((h) => `@${h}`).join(" ");
+      if (p.action === "started") what = `started ${run}${to ? ` (watching: ${to})` : ""}`;
+      else if (p.action === "shared") what = `asked ${to} to watch ${run} (${p.status})`;
+      else {
+        const exit = p.exit_code != null && p.status !== "succeeded" ? ` (exit ${p.exit_code})` : "";
+        const after = p.seconds != null ? ` after ${duration(p.seconds)}` : "";
+        const last = p.progress ? `; last: "${truncate(p.progress, 160)}"` : "";
+        what = `${run} ${p.status}${exit}${after}${last}`;
+      }
+      break;
+    }
+    case "handoff": {
+      const h = `handoff #${p.number} "${truncate(p.title ?? "", 160)}"`;
+      const to = (e.mentions ?? []).map((m) => `@${m}`).join(" ");
+      what = p.action === "created" ? `handed off ${h} to ${to || "anyone who picks it up"}`
+        : p.action === "accepted" ? `took over ${h}`
+        : `${p.action} ${h}`;
+      break;
+    }
     default: what = truncate(JSON.stringify(p), 200);
   }
   return `• ${who} · ${ago(e.created_at)} · ${what}`;
@@ -337,6 +366,200 @@ export async function overview(ctx: Ctx): Promise<string> {
   if (qs.length) out.push("", "Open questions:", ...qs.map((q) => `- ${recordRef(q)} ${q.title}`));
   if (here.length) out.push("", "Right now:", ...here.map((l) => `- ${l}`));
   return out.join("\n");
+}
+
+// ─────────────────────────────────────────────────────────────── runs
+
+export interface Run {
+  id: string;
+  number: number;
+  started_by: string;
+  title: string;
+  host: string | null;
+  command: string | null;
+  reporter: "wrapper" | "claude";
+  status: "running" | "succeeded" | "failed" | "cancelled";
+  progress: string | null;
+  log_tail: string | null;
+  exit_code: number | null;
+  started_at: string;
+  updated_at: string;
+  finished_at: string | null;
+}
+
+export const RUN_STATUSES = ["running", "succeeded", "failed", "cancelled"] as const;
+// `contexter run` reports every minute; this much silence means the job or its machine is gone.
+const HEARTBEAT_STALE_MS = 5 * 60_000;
+// Finished runs stay in the runs block this long for the people they matter to.
+const RUN_RECENT_MS = 2 * 60 * 60_000;
+
+export async function startRun(ctx: Ctx, run: {
+  title: string; host?: string; command?: string; watchers?: string[]; reporter?: "wrapper" | "claude";
+}): Promise<Run> {
+  return unwrap(await ctx.db.rpc("start_run", {
+    p_workspace: ctx.ws.id, p_title: run.title, p_host: run.host ?? null, p_command: run.command ?? null,
+    p_session: ctx.session ?? null, p_watchers: run.watchers ?? [], p_reporter: run.reporter ?? "claude",
+  }).single());
+}
+
+export async function getRun(ctx: Ctx, number: number): Promise<Run> {
+  const r = unwrap(await ctx.db.from("runs").select("*").eq("workspace_id", ctx.ws.id).eq("number", number).maybeSingle());
+  if (!r) throw new ContexterError(`No run #${number} in ${ctx.ws.slug}. The runs tool lists them.`);
+  return r;
+}
+
+export async function updateRun(ctx: Ctx, runId: string, report: {
+  status?: string; progress?: string; logTail?: string; exitCode?: number;
+}): Promise<Run> {
+  return unwrap(await ctx.db.rpc("update_run", {
+    p_run: runId, p_status: report.status ?? null, p_progress: report.progress ?? null,
+    p_log_tail: report.logTail ?? null, p_exit_code: report.exitCode ?? null,
+  }).single());
+}
+
+export async function watchRun(ctx: Ctx, number: number, handles: string[] = []) {
+  const r = await getRun(ctx, number);
+  unwrap(await ctx.db.rpc("watch_run", { p_run: r.id, p_handles: handles, p_session: ctx.session ?? null }).single());
+  return handles.length
+    ? `${handles.map((h) => `@${h}`).join(" ")} will hear about run #${number} on their next message, and again when it ends.`
+    : `You're watching run #${number}; you'll hear when it ends.`;
+}
+
+async function watchedRunIds(ctx: Ctx): Promise<Set<string>> {
+  const rows = unwrap(await ctx.db.from("run_watchers").select("run_id").eq("user_id", ctx.userId)) as { run_id: string }[];
+  return new Set(rows.map((r) => r.run_id));
+}
+
+function runLine(ctx: Ctx, r: Run, watched: boolean): string {
+  const who = r.started_by === ctx.userId ? "you" : ctx.handles.get(r.started_by) ?? "someone";
+  const where = r.host ? ` on ${r.host}` : "";
+  const head = `run #${r.number} · ${who} · "${truncate(r.title, 120)}"${where}`;
+  const mark = watched ? " (you're watching)" : "";
+  if (r.status === "running") {
+    const silent = Date.now() - new Date(r.updated_at).getTime();
+    const health = r.reporter === "wrapper" && silent > HEARTBEAT_STALE_MS
+      ? ` · NO HEARTBEAT for ${duration(silent / 1000)}: the job or its machine may have died`
+      : r.reporter === "claude" ? ` · last checked ${ago(r.updated_at)}` : "";
+    const progress = r.progress ? ` · ${truncate(r.progress, 160)}` : "";
+    return `${head} · running ${duration((Date.now() - new Date(r.started_at).getTime()) / 1000)}${progress}${health}${mark}`;
+  }
+  const exit = r.exit_code != null && r.status !== "succeeded" ? ` (exit ${r.exit_code})` : "";
+  const last = r.progress ? ` · last: "${truncate(r.progress, 160)}"` : "";
+  return `${head} · ${r.status.toUpperCase()}${exit} ${ago(r.finished_at ?? r.updated_at)}${last}${mark}`;
+}
+
+// The team's running jobs, plus recently finished ones the reader started or watches, for the
+// block injected before every message. "" when there's nothing to say.
+export async function runsBlock(ctx: Ctx, max = 8): Promise<string> {
+  const since = new Date(Date.now() - RUN_RECENT_MS).toISOString();
+  const [rows, watched] = await Promise.all([
+    ctx.db.from("runs").select("*").eq("workspace_id", ctx.ws.id)
+      .or(`status.eq.running,finished_at.gt."${since}"`).order("updated_at", { ascending: false }).limit(40),
+    watchedRunIds(ctx),
+  ]);
+  const runs = (unwrap(rows) as Run[]).filter((r) =>
+    r.status === "running" || r.started_by === ctx.userId || watched.has(r.id));
+  if (!runs.length) return "";
+  // What the reader is involved in comes first.
+  const mine = (r: Run) => r.started_by === ctx.userId || watched.has(r.id);
+  runs.sort((a, b) => Number(mine(b)) - Number(mine(a)));
+  const lines = runs.slice(0, max).map((r) => `• ${runLine(ctx, r, watched.has(r.id))}`);
+  if (runs.length > max) lines.push(`• … ${runs.length - max} more; call the runs tool`);
+  return [
+    `── runs (${ctx.ws.slug}) ──`,
+    ...lines,
+    "Mention a failed or stalled run you started or watch to the user. Details and log tail: the runs tool with run=<number>.",
+    "──",
+  ].join("\n");
+}
+
+export async function listRuns(ctx: Ctx, limit = 20): Promise<string> {
+  const [rows, watched] = await Promise.all([
+    ctx.db.from("runs").select("*").eq("workspace_id", ctx.ws.id).order("number", { ascending: false }).limit(limit),
+    watchedRunIds(ctx),
+  ]);
+  const runs = unwrap(rows) as Run[];
+  if (!runs.length) return `No runs in ${ctx.ws.slug} yet. Start one with start_run, or wrap the command in \`contexter run --\`.`;
+  return runs.map((r) => `- ${runLine(ctx, r, watched.has(r.id))}`).join("\n");
+}
+
+export async function runDetail(ctx: Ctx, number: number): Promise<string> {
+  const r = await getRun(ctx, number);
+  const watchers = unwrap(await ctx.db.from("run_watchers").select("user_id").eq("run_id", r.id)) as { user_id: string }[];
+  const names = watchers.map((w) => ctx.handles.get(w.user_id) ?? "?");
+  return [
+    runLine(ctx, r, watchers.some((w) => w.user_id === ctx.userId)),
+    r.command ? `command: ${r.command}` : "",
+    `started ${new Date(r.started_at).toISOString()} · last report ${ago(r.updated_at)} · reported by ${r.reporter === "wrapper" ? "contexter run (heartbeat every minute)" : "Claude"}`,
+    names.length ? `watching: ${names.join(", ")}` : "",
+    r.log_tail ? `\n────── log tail ──────\n${r.log_tail}` : "(no log captured)",
+  ].filter(Boolean).join("\n");
+}
+
+// ─────────────────────────────────────────────────────────────── handoffs
+
+export interface Handoff {
+  id: string;
+  number: number;
+  from_user: string;
+  to_user: string | null;
+  title: string;
+  summary: string;
+  next_steps: string | null;
+  files: string[];
+  status: string;
+  created_at: string;
+}
+
+export async function createHandoff(ctx: Ctx, h: {
+  to?: string; title: string; summary: string; nextSteps?: string; files?: string[];
+}) {
+  const row = unwrap(await ctx.db.rpc("create_handoff", {
+    p_workspace: ctx.ws.id, p_to: h.to?.replace(/^@/, "") || null, p_title: h.title, p_summary: h.summary,
+    p_next_steps: h.nextSteps ?? null, p_files: h.files ?? [], p_session: ctx.session ?? null,
+  }).single()) as Handoff;
+  const running = unwrap(await ctx.db.from("runs").select("number").eq("workspace_id", ctx.ws.id)
+    .eq("started_by", ctx.userId).eq("status", "running")) as { number: number }[];
+  const runs = running.length && h.to ? ` They now watch your running ${running.map((r) => `#${r.number}`).join(", ")}.` : "";
+  return `Handoff #${row.number} is waiting for ${h.to ? `@${h.to.replace(/^@/, "")}` : "anyone on the team"}: ` +
+    `their Claude brings it up first on their next message.${runs} Your unit locks pass to them when they accept.`;
+}
+
+export async function resolveHandoff(ctx: Ctx, number: number, action: "accept" | "decline" | "cancel") {
+  const h = unwrap(await ctx.db.from("handoffs").select("id").eq("workspace_id", ctx.ws.id).eq("number", number).maybeSingle());
+  if (!h) throw new ContexterError(`No handoff #${number} in ${ctx.ws.slug}.`);
+  const status = { accept: "accepted", decline: "declined", cancel: "cancelled" }[action];
+  const row = unwrap(await ctx.db.rpc("resolve_handoff", { p_handoff: h.id, p_action: status, p_session: ctx.session ?? null })
+    .single()) as Handoff;
+  if (action !== "accept") return `Handoff #${number} ${status}.`;
+  return [`You took over handoff #${number}. Here it is again:`, "", handoffText(ctx, row)].join("\n");
+}
+
+function handoffText(ctx: Ctx, h: Handoff): string {
+  const from = ctx.handles.get(h.from_user) ?? "someone";
+  return [
+    `handoff #${h.number} from ${from} · ${ago(h.created_at)}${h.to_user ? "" : " · open to anyone"} · "${h.title}"`,
+    `Where it stands: ${h.summary}`,
+    h.next_steps ? `Next steps: ${h.next_steps}` : "",
+    h.files.length ? `Files: ${h.files.join(", ")}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+// Open handoffs the reader could take over: addressed to them, or to anyone (not their own).
+export async function handoffsBlock(ctx: Ctx): Promise<string> {
+  const rows = unwrap(await ctx.db.from("handoffs").select("*").eq("workspace_id", ctx.ws.id).eq("status", "open")
+    .neq("from_user", ctx.userId).or(`to_user.eq.${ctx.userId},to_user.is.null`).order("number")) as Handoff[];
+  if (!rows.length) return "";
+  return [
+    "── handed to you ──",
+    ...rows.slice(0, 3).map((h) => handoffText(ctx, h)).join("\n\n").split("\n"),
+    ...(rows.length > 3 ? [`… ${rows.length - 3} more open handoffs.`] : []),
+    "A teammate passed this unfinished work to this user's Claude (for example because their usage limit ran out). " +
+    "Bring it up first. If the user wants to take it over, call resolve_handoff with action accept (that moves the " +
+    "sender's unit locks to this user and adds the sender's running runs to the ones this user watches), then carry on " +
+    "from the next steps. If not, resolve it with action decline.",
+    "──",
+  ].join("\n");
 }
 
 // ─────────────────────────────────────────────────────────────── shared memory
@@ -712,4 +935,7 @@ export const CHAT_RULES = `You are working in a shared contexter workspace. Seve
 - Explain the why: pass reasoning to write_unit, and call record for decisions, findings, rejected alternatives and open questions.
 - Claim a unit before a long edit and release it after. Respect other people's locks.
 - At the end of a reply that did real work, call post_turn with a one-to-two sentence summary so teammates see it.
-- If the user starts a message with "!private", share nothing about it: call sync without user_request, and don't call post_turn or mention.`;
+- If the user starts a message with "!private", share nothing about it: call sync without user_request, and don't call post_turn or mention.
+- When the user starts a long job (a training run, a stress test, a benchmark), register it with start_run (or suggest running it under \`contexter run --\`), and update_run when you learn it finished. If a teammate should follow it, pass them as watchers.
+- If the user is about to stop (for example their usage limit is running out) with work unfinished, offer to hand it off: call handoff with where things stand, the next steps and the files involved.
+- A "handed to you" block is work a teammate passed to this user: raise it first, and resolve_handoff (accept or decline) once the user decides.`;

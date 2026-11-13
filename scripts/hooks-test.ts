@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { CLI, cliRunner } from "./lib/cli.ts";
 import { signIn } from "./lib/local.ts";
 import { projectPath } from "../packages/cli/src/hooks.ts";
+import * as core from "../supabase/functions/_shared/contexter.ts";
 
 const run = Date.now().toString(36);
 const slug = `hooks-${run}`;
@@ -68,7 +69,7 @@ await step("install writes hooks, skill and project link", () => {
       ["PostToolUse", "PreToolUse", "SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"]);
     const settings = JSON.parse(readFileSync(join(root, who, ".claude/settings.json"), "utf8"));
     assert.equal(settings.hooks.PreToolUse[0].matcher, "Edit|Write|MultiEdit|NotebookEdit");
-    assert.equal(settings.hooks.PostToolUse[0].matcher, "Edit|Write|MultiEdit|NotebookEdit");
+    assert.equal(settings.hooks.PostToolUse[0].matcher, "Edit|Write|MultiEdit|NotebookEdit|Bash");
     assert.ok(readFileSync(join(root, who, ".claude/skills/contexter/SKILL.md"), "utf8").includes("name: contexter"));
     assert.equal(JSON.parse(readFileSync(join(root, who, ".contexter.json"), "utf8")).workspace, slug);
   }
@@ -228,6 +229,47 @@ await step("files outside the project are ignored", () => {
   const r = hook("bob", "PreToolUse", { session_id: "bob-2", tool_name: "Write", tool_input: { file_path: "/etc/hosts", content: "x" } });
   assert.equal(r.status, 0);
   assert.deepEqual(r.output, {});
+});
+
+let bgRun = 0;
+await step("a background command Claude starts becomes a run the team sees", () => {
+  hook("alice", "UserPromptSubmit", { session_id: "alice-bg", prompt: "Start the stress test on the ingest service" });
+  const r = hook("alice", "PostToolUse", { session_id: "alice-bg", tool_name: "Bash", tool_input: {
+    command: "./stress.sh --rps 500", description: "Stress test the ingest service", run_in_background: true } });
+  bgRun = Number(/now run #(\d+)/.exec(r.context)?.[1]);
+  assert.ok(bgRun, r.context);
+  assert.match(r.context, new RegExp(`call contexter's update_run with run=${bgRun}`));
+  const b = hook("bob", "UserPromptSubmit", { session_id: "bob-1", prompt: "anything running?" });
+  assert.match(b.context, new RegExp(`alice · just now · started run #${bgRun} "Stress test the ingest service" on \\S+`));
+  assert.match(b.context, new RegExp(`── runs .*──\\n• run #${bgRun} · alice · "Stress test the ingest service" on \\S+ · running`));
+  // Not runs: foreground commands, commands that report themselves through contexter run, private turns.
+  for (const tool_input of [
+    { command: "ls -la" },
+    { command: "node /x/contexter.mjs run -t soak -- ./soak.sh", run_in_background: true },
+  ]) {
+    assert.equal(hook("alice", "PostToolUse", { session_id: "alice-bg", tool_name: "Bash", tool_input }).context, "");
+  }
+  hook("alice", "UserPromptSubmit", { session_id: "alice-bg", prompt: "!private start my side project's build" });
+  assert.equal(hook("alice", "PostToolUse", { session_id: "alice-bg", tool_name: "Bash",
+    tool_input: { command: "./side-project.sh", run_in_background: true } }).context, "");
+  hook("alice", "Stop", { session_id: "alice-bg", last_assistant_message: "Started it." });
+});
+
+await step("a handoff comes first in the teammate's next message, and they can take it over", async () => {
+  const a = await signIn(`alice-${run}@hooks.local`);
+  const ctx = await core.loadCtx(a.sb, a.userId, { workspace: slug, session: null });
+  await core.createHandoff(ctx, {
+    to: "bob", title: "Finish the ingest stress test", summary: "The stress test is running; nothing analysed yet.",
+    nextSteps: "Read the run's log tail and write up p99 latency.",
+  });
+  const b = hook("bob", "UserPromptSubmit", { session_id: "bob-1", prompt: "hi" });
+  assert.match(b.context, /^── handed to you ──\nhandoff #1 from alice · just now · "Finish the ingest stress test"/);
+  assert.match(b.context, new RegExp(`run #${bgRun} · alice · "Stress test the ingest service" .*\\(you're watching\\)`));
+  assert.match(cli("bob", ["handoffs", "1", "--accept"]), /You took over handoff #1/);
+  assert.doesNotMatch(hook("bob", "UserPromptSubmit", { session_id: "bob-1", prompt: "ok" }).context, /handed to you/);
+  await core.updateRun(ctx, (await core.getRun(ctx, bgRun)).id, { status: "succeeded", exitCode: 0, progress: "p99 41ms" });
+  const after = hook("bob", "UserPromptSubmit", { session_id: "bob-1", prompt: "how did it go?" });
+  assert.match(after.context, new RegExp(`run #${bgRun} "Stress test the ingest service" on \\S+ succeeded after \\d+s; last: "p99 41ms"  ← mentions you`));
 });
 
 await step("same member, other client: alice's chat sees her own Code session", async () => {

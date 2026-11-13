@@ -8,9 +8,12 @@ import * as core from "../../../supabase/functions/_shared/contexter.ts";
 import { runHook } from "./hooks.ts";
 import { chatInstructions, installCode, packageSkill, uninstallCode } from "./install.ts";
 import { cliCtx, exportWorkspace, mirror, watch } from "./workspace.ts";
+import { runJob } from "./run.ts";
+import { projectWorkspace } from "./hooks.ts";
 
 const program = new Command("contexter")
-  .description("Shared context and reasoning for teams using Claude on separate accounts");
+  .description("Shared context and reasoning for teams using Claude on separate accounts")
+  .enablePositionalOptions(); // lets `contexter run` pass the job's own options through
 
 program.command("setup")
   .description("Point this machine at your team's Supabase project")
@@ -183,6 +186,40 @@ program.command("watch")
   .option("--notify", "also show desktop notifications")
   .action(async (opts) => watch(opts));
 
+program.command("run")
+  .description("Run a long job and keep the team posted: progress, log tail and exit code, with a heartbeat every minute")
+  .argument("<command...>", "the command, after --; one quoted argument runs through the shell")
+  .option("-t, --title <title>", "what it is (defaults to the command)")
+  .option("--host <name>", "machine name to show (defaults to this host)")
+  .option("-w, --watch <handles...>", "teammates who should follow it and hear when it ends")
+  .passThroughOptions()
+  .action((command: string[], opts) => runJob(command, opts));
+
+program.command("runs")
+  .description("The workspace's runs, or one run with its log tail")
+  .argument("[number]", "a run number")
+  .option("-w, --watch [handles...]", "watch this run yourself, or have these teammates follow it")
+  .action(async (number: string | undefined, opts: { watch?: true | string[] }) => {
+    const ctx = await cliCtx(projectWorkspace(process.cwd()));
+    if (!number) return console.log(await core.listRuns(ctx));
+    const n = Number(number.replace(/^#/, ""));
+    if (opts.watch) console.log(await core.watchRun(ctx, n, opts.watch === true ? [] : opts.watch.map((h) => h.replace(/^@/, ""))));
+    console.log(await core.runDetail(ctx, n));
+  });
+
+program.command("handoffs")
+  .description("Open handoffs you could take over, or accept/decline one")
+  .argument("[number]", "a handoff number")
+  .addOption(new Option("--accept").conflicts("decline"))
+  .option("--decline")
+  .action(async (number: string | undefined, opts: { accept?: boolean; decline?: boolean }) => {
+    const ctx = await cliCtx(projectWorkspace(process.cwd()));
+    if (number && (opts.accept || opts.decline)) {
+      return console.log(await core.resolveHandoff(ctx, Number(number.replace(/^#/, "")), opts.accept ? "accept" : "decline"));
+    }
+    console.log(await core.handoffsBlock(ctx) || "No open handoffs for you.");
+  });
+
 const install = program.command("install").description("Connect Claude to contexter");
 install.command("code")
   .description("Claude Code: hooks (automatic sync every message) + skill")
@@ -202,6 +239,6 @@ program.command("hook", { hidden: true })
   .action((event) => runHook(event));
 
 program.parseAsync().catch((err) => {
-  console.error(err instanceof CliError ? `error: ${err.message}` : err);
+  console.error(err instanceof CliError || err instanceof core.ContexterError ? `error: ${err.message}` : err);
   process.exit(1);
 });

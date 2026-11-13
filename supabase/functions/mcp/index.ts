@@ -53,14 +53,17 @@ function buildServer(db: core.Db, userId: string, client: core.Client) {
     // either way, so show this turn as private work rather than leaving the old task live.
     const request = user_request?.trim() ?? "";
     await core.startTask(ctx, request || null);
-    const [here, hint, overlap] = await Promise.all([
+    const [here, hint, overlap, handed, runs] = await Promise.all([
       core.presence(ctx), core.compactionHint(ctx), request ? core.overlapWarning(ctx, request) : "",
+      core.handoffsBlock(ctx), core.runsBlock(ctx),
     ]);
     const delta = await core.feedDelta(ctx);
     return [
+      handed,
       overlap,
       delta || `No new activity in ${ctx.ws.slug} since you last looked.`,
       here.length ? `Right now:\n${here.map((l) => `- ${l}`).join("\n")}` : "",
+      runs,
       hint,
     ].filter(Boolean).join("\n\n");
   }, { delta: false }));
@@ -72,7 +75,8 @@ function buildServer(db: core.Db, userId: string, client: core.Client) {
     inputSchema: z.object({ workspace }),
     annotations: { readOnlyHint: true },
   }, async ({ workspace }) => run(workspace, async (ctx) =>
-    [await core.overview(ctx), await core.memoryContext(ctx), await core.compactionHint(ctx)].filter(Boolean).join("\n\n")));
+    [await core.handoffsBlock(ctx), await core.overview(ctx), await core.memoryContext(ctx), await core.runsBlock(ctx),
+     await core.compactionHint(ctx)].filter(Boolean).join("\n\n")));
 
   server.registerTool("post_turn", {
     title: "Share this turn with the team",
@@ -225,6 +229,83 @@ function buildServer(db: core.Db, userId: string, client: core.Client) {
     description: "Leave a message for teammates; their Claude raises it first on their next message.",
     inputSchema: z.object({ workspace, to: z.array(z.string()).min(1).describe("Member handles"), text: z.string() }),
   }, async ({ workspace, to, text: msg }) => run(workspace, (ctx) => core.mention(ctx, to, msg)));
+
+  const runNumber = z.number().int().min(1).describe("Run number, e.g. 12 for run #12");
+
+  server.registerTool("start_run", {
+    title: "Register a long-running job",
+    description: "Tell the team about a long job the user started (training, stress test, benchmark, sweep) so " +
+      "everyone sees its status before every message. Prefer launching it under `contexter run -- <command>`, which " +
+      "registers and reports by itself (progress, log tail, exit code, heartbeat); use this tool when that isn't possible, " +
+      "then call update_run when you learn how it went.",
+    inputSchema: z.object({
+      workspace,
+      title: z.string().min(1).max(200).describe("What it is, e.g. 'stress test of the ingest service'"),
+      host: z.string().optional().describe("Machine it runs on, e.g. watermax"),
+      command: z.string().optional(),
+      watchers: z.array(z.string()).optional().describe("Teammates (handles) who should follow it and hear when it ends"),
+    }),
+  }, async ({ workspace, title, host, command, watchers }) => run(workspace, async (ctx) => {
+    const r = await core.startRun(ctx, { title, host, command, watchers });
+    return `Registered run #${r.number}. Call update_run with run=${r.number} when you see progress or it ends.`;
+  }));
+
+  server.registerTool("update_run", {
+    title: "Report on a run",
+    description: "Update a run's progress or log tail, or report that it ended (status succeeded, failed or cancelled). " +
+      "Ending a run tells its watchers.",
+    inputSchema: z.object({
+      workspace, run: runNumber,
+      status: z.enum(core.RUN_STATUSES).optional(),
+      progress: z.string().max(300).optional().describe("One line, e.g. 'step 1200/5000, p99 41ms'"),
+      log_tail: z.string().optional().describe("The last lines of its output"),
+      exit_code: z.number().int().optional(),
+    }),
+  }, async ({ workspace, run: number, status, progress, log_tail, exit_code }) => run(workspace, async (ctx) => {
+    const r = await core.updateRun(ctx, (await core.getRun(ctx, number)).id, { status, progress, logTail: log_tail, exitCode: exit_code });
+    return `Run #${r.number} is ${r.status}.`;
+  }));
+
+  server.registerTool("runs", {
+    title: "Runs",
+    description: "List the workspace's runs (long jobs), or one run in detail with its log tail.",
+    inputSchema: z.object({ workspace, run: runNumber.optional() }),
+    annotations: { readOnlyHint: true },
+  }, async ({ workspace, run: number }) => run(workspace, (ctx) => number ? core.runDetail(ctx, number) : core.listRuns(ctx)));
+
+  server.registerTool("watch_run", {
+    title: "Watch a run",
+    description: "Have teammates follow a run: they're told now and again when it ends, and see it first in their " +
+      "runs block. With no members, the user watches it themselves.",
+    inputSchema: z.object({ workspace, run: runNumber, members: z.array(z.string()).optional().describe("Handles") }),
+  }, async ({ workspace, run: number, members }) => run(workspace, (ctx) => core.watchRun(ctx, number, members ?? [])));
+
+  server.registerTool("handoff", {
+    title: "Hand work to a teammate",
+    description: "Pass unfinished work to a teammate's Claude, e.g. before the user's usage limit runs out. Write it " +
+      "so someone with none of this conversation can carry on: where things stand, what's left, the files involved. " +
+      "The teammate watches the user's running runs at once and takes over their unit locks on accepting.",
+    inputSchema: z.object({
+      workspace,
+      to: z.string().optional().describe("Teammate's handle; omit to offer it to anyone"),
+      title: z.string().min(3).max(200),
+      summary: z.string().min(20).describe("What the goal is, what's done, what was decided or found, what's in progress"),
+      next_steps: z.string().optional().describe("Concrete next steps, in order"),
+      files: z.array(z.string()).optional().describe("Files, units or runs involved"),
+    }),
+  }, async ({ workspace, to, title, summary, next_steps, files }) =>
+    run(workspace, (ctx) => core.createHandoff(ctx, { to, title, summary, nextSteps: next_steps, files })));
+
+  server.registerTool("resolve_handoff", {
+    title: "Accept or decline a handoff",
+    description: "accept: this user takes over the work (their Claude gets the details, the sender's unit locks and " +
+      "running runs). decline: leave it for someone else. cancel: the sender withdraws it.",
+    inputSchema: z.object({
+      workspace,
+      handoff: z.number().int().min(1).describe("Handoff number"),
+      action: z.enum(["accept", "decline", "cancel"]),
+    }),
+  }, async ({ workspace, handoff, action }) => run(workspace, (ctx) => core.resolveHandoff(ctx, handoff, action)));
 
   server.registerTool("compact_memory", {
     title: "Update the shared memory",

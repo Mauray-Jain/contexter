@@ -3,12 +3,14 @@
 //   UserPromptSubmit  → post the prompt as this session's task, inject what teammates did since
 //                       the last message, what they're doing now, and any overlapping earlier work
 //   PreToolUse        → before Claude edits a file: warn if a teammate is on it
-//   PostToolUse       → after an edit went through: record the file on this session's task
+//   PostToolUse       → after an edit went through: record the file on this session's task;
+//                       after Claude starts a background command: register it as a run
 //   Stop              → post a summary of Claude's reply, mark the task finished
 //   SessionEnd        → close the session, release its locks
 // Hooks must never get in the way: every failure is logged and the hook exits 0
 // (exit 2 on UserPromptSubmit would block the user's prompt).
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import * as core from "../../../supabase/functions/_shared/contexter.ts";
 import { getClient, requireUser } from "./client.ts";
@@ -103,13 +105,15 @@ async function sessionStart(input: HookInput) {
   const { ctx } = c;
   // Mark the backlog as read: the memory context below already covers it.
   await core.feedDelta(ctx, 500);
-  const [overview, memory, hint] = await Promise.all([core.overview(ctx), core.memoryContext(ctx), core.compactionHint(ctx)]);
+  const [handed, overview, memory, runs, hint] = await Promise.all([
+    core.handoffsBlock(ctx), core.overview(ctx), core.memoryContext(ctx), core.runsBlock(ctx), core.compactionHint(ctx),
+  ]);
   emit("SessionStart", [
     `This project is the shared contexter workspace "${ctx.ws.slug}". Teammates use their own Claude on the same workspace; ` +
     "contexter keeps everyone in sync. Before each user message you'll receive a team feed block with what teammates and " +
     "their Claudes did. Use the contexter MCP tools to read and write shared units (always with expected_version), to record " +
     "reasoning (record), and to message teammates (mention). If the user's message starts with !private it is not shared.",
-    overview, memory, hint,
+    handed, overview, memory, runs, hint,
   ].filter(Boolean).join("\n\n"));
 }
 
@@ -123,12 +127,13 @@ async function userPromptSubmit(input: HookInput) {
   const shared = !isPrivate && prompt.trim() ? prompt : "";
   const promptEvent = shared ? await core.postPrompt(ctx, shared) : null;
   await core.startTask(ctx, shared || null, promptEvent);
-  const [delta, now, overlap, hint] = await Promise.all([
+  const [delta, now, overlap, hint, handed, runs] = await Promise.all([
     core.feedDelta(ctx), core.workInProgress(ctx), shared ? core.overlapWarning(ctx, shared) : "", core.compactionHint(ctx),
+    core.handoffsBlock(ctx), core.runsBlock(ctx),
   ]);
   emit("UserPromptSubmit", [
     isPrivate ? "[contexter] This message is private: it is not shared with the team. Don't post it." : "",
-    overlap, delta, now, hint,
+    handed, overlap, delta, now, runs, hint,
   ].filter(Boolean).join("\n\n"));
 }
 
@@ -215,9 +220,11 @@ async function preToolUse(input: HookInput) {
   process.stdout.write(JSON.stringify({ hookSpecificOutput: out }));
 }
 
-// After an edit went through (PostToolUse only fires for tool calls that ran): record the file on
-// this session's task, so teammates see it live. Private turns don't publish their files.
+// After a tool call ran (PostToolUse only fires for calls that did): a background command becomes a
+// run; an edit records its file on this session's task, so teammates see it live. Private turns
+// share neither.
 async function postToolUse(input: HookInput) {
+  if (input.tool_name === "Bash") return backgroundCommand(input);
   const t = await fileTool(input);
   if (!t) return;
   const { state, path } = t;
@@ -232,6 +239,26 @@ async function postToolUse(input: HookInput) {
     });
   }
   if (!state.private) await core.touchFile(t.ctx, path, true);
+}
+
+// A command Claude started in the background is probably a long job: register it as a run so the
+// team sees it, and ask Claude to report how it ends. Commands already under `contexter run`
+// register themselves.
+async function backgroundCommand(input: HookInput) {
+  const command = input.tool_input?.command;
+  if (input.tool_input?.run_in_background !== true || typeof command !== "string") return;
+  if (/\bcontexter(\.mjs)?["']?\s+run\b/.test(command)) return;
+  const c = await context(input, { create: false });
+  if (!c || c.state.private) return;
+  const description = input.tool_input?.description;
+  const run = await core.startRun(c.ctx, {
+    title: typeof description === "string" && description.trim() ? description : core.truncate(command, 120),
+    host: hostname(), command,
+  });
+  emit("PostToolUse",
+    `[contexter] This background command is now run #${run.number}, so teammates can see it. When you learn how it ` +
+    `went (its output, or the user tells you), call contexter's update_run with run=${run.number}: status succeeded, ` +
+    "failed or cancelled, exit_code, and a one-line progress. Update progress along the way if it's long.");
 }
 
 async function sessionEnd(input: HookInput) {
@@ -262,7 +289,7 @@ export const HOOK_EVENTS = {
 // Events that only fire for some tools: the file-editing tools.
 export const HOOK_MATCHERS: Partial<Record<keyof typeof HOOK_EVENTS, string>> = {
   PreToolUse: "Edit|Write|MultiEdit|NotebookEdit",
-  PostToolUse: "Edit|Write|MultiEdit|NotebookEdit",
+  PostToolUse: "Edit|Write|MultiEdit|NotebookEdit|Bash",
 };
 
 export async function runHook(name: string) {
