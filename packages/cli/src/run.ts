@@ -2,7 +2,7 @@
 // run, its output passes through to this terminal unchanged, and every minute the last line
 // (progress) and the end of the output (log tail) go to the workspace as a heartbeat. When it
 // exits, its status and exit code are reported and its watchers are told.
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { hostname } from "node:os";
 import { constants } from "node:os";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -24,6 +24,17 @@ export function lastLine(text: string): string {
 }
 
 export async function runJob(command: string[], opts: { title?: string; host?: string; watch?: string[] }) {
+  // Ctrl-C or a kill stops the job, which then counts as cancelled rather than failed. Installed
+  // before anything else, so a stop that comes before the job has even started is still reported.
+  let cancelled = false;
+  let child: ChildProcess | undefined;
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    process.on(sig, () => {
+      cancelled = true;
+      child?.kill(sig);
+    });
+  }
+
   const ctx = await cliCtx(projectWorkspace(process.cwd()));
   const sb = ctx.db as unknown as SupabaseClient;
   const text = command.join(" ");
@@ -31,12 +42,13 @@ export async function runJob(command: string[], opts: { title?: string; host?: s
     title: opts.title ?? core.truncate(text, 120), host: opts.host ?? hostname(), command: text,
     watchers: (opts.watch ?? []).map((h) => h.replace(/^@/, "")), reporter: "wrapper",
   });
-  console.error(`[contexter] run #${run.number} in ${ctx.ws.slug}: teammates can follow it.`);
 
   // One argument runs through the shell, so `contexter run -- "make && ./bench"` works.
-  const child = command.length === 1
+  child = command.length === 1
     ? spawn(command[0], { shell: true, stdio: ["inherit", "pipe", "pipe"] })
     : spawn(command[0], command.slice(1), { stdio: ["inherit", "pipe", "pipe"] });
+  if (cancelled) child.kill("SIGINT"); // stopped while the run was being registered
+  console.error(`[contexter] run #${run.number} in ${ctx.ws.slug}: teammates can follow it.`);
 
   let tail = "";
   const capture = (out: NodeJS.WriteStream) => (chunk: Buffer) => {
@@ -61,21 +73,12 @@ export async function runJob(command: string[], opts: { title?: string; host?: s
     });
   }, HEARTBEAT_MS);
 
-  // Ctrl-C or a kill stops the job, which then counts as cancelled rather than failed.
-  let cancelled = false;
-  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
-    process.on(sig, () => {
-      cancelled = true;
-      child.kill(sig);
-    });
-  }
-
   const [code, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((resolve) => {
-    child.on("error", (err) => {
+    child!.on("error", (err) => {
       tail += `\n${err.message}`;
       resolve([127, null]);
     });
-    child.on("close", (c, s) => resolve([c, s]));
+    child!.on("close", (c, s) => resolve([c, s]));
   });
   clearInterval(heartbeat);
   const exitCode = code ?? 128 + (signal ? constants.signals[signal] ?? 0 : 0);
