@@ -1,7 +1,7 @@
 -- Access model + concurrency tests for the core schema. Run: npx supabase test db
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(38);
+select plan(54);
 
 -- Three people: alice (owner), bob (editor via invite), carol (viewer via invite), eve (outsider).
 insert into auth.users (id, email) values
@@ -147,6 +147,107 @@ select ok(exists(select 1 from public.search_workspace((select id from public.wo
 select throws_ok($$ insert into public.profiles (active_workspace) values (gen_random_uuid()) $$, null, null,
   'default workspace must be one you belong to');
 reset role;
+
+-- ── work awareness: tasks, file activity, overlapping requests
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000a');
+create temp table asess as
+  select (public.ensure_session((select id from public.workspaces), 'claude-code', 'alice code', 'alice-ext')).id;
+grant select on asess to authenticated;
+reset role;
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000b');
+create temp table bsess as
+  select (public.ensure_session((select id from public.workspaces), 'claude-code', 'bob code', 'bob-ext')).id;
+grant select on bsess to authenticated;
+select lives_ok($$ select public.start_task((select id from bsess), 'Rewrite the results table with the new reranker runs') $$,
+  'members start tasks on their own session');
+select throws_ok($$ select public.start_task((select id from asess), 'hijack') $$, 'P0002', null,
+  'nobody can set the task of someone else''s session');
+select is((select count(*)::int from public.touch_file((select id from bsess), 'tables/results.tex')), 0,
+  'the first member on a file sees nobody else');
+insert into public.events (workspace_id, session_id, kind, payload)
+  select id, (select id from bsess), 'prompt', '{"text":"Rewrite the results table with the new reranker runs"}' from public.workspaces;
+reset role;
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000a');
+select ok((select active from public.touch_file((select id from asess), 'tables/results.tex') limit 1),
+  'a teammate mid-task on the same file is reported as active');
+select ok(exists(select 1 from public.find_overlap((select id from public.workspaces),
+  'update the results table using the reranker runs', (select id from asess)) where active),
+  'an overlapping request finds the teammate''s live task');
+select is((select count(*)::int from public.find_overlap((select id from public.workspaces),
+  'draft the conclusion about future datasets', (select id from asess))), 0,
+  'an unrelated request finds nothing');
+reset role;
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000b');
+select public.finish_task((select id from bsess));
+reset role;
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000a');
+select ok(not (select active from public.touch_file((select id from asess), 'tables/results.tex') limit 1) is true,
+  'a finished task is no longer active on the file');
+reset role;
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000e');
+select throws_ok($$ select * from public.find_overlap((select id from public.workspaces limit 1), 'anything at all here') $$,
+  null, null, 'outsiders can''t search for overlaps');
+reset role;
+
+-- bob: an interrupted request, a finished one, then an unrelated live task, all in one session
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000b');
+create temp table bsess2 as
+  select (public.ensure_session((select id from public.workspaces), 'claude-code', 'bob code 2', 'bob-ext2')).id;
+grant select on bsess2 to authenticated;
+select public.start_task((select id from bsess2), 'Plot the latency histogram for the reranker');
+insert into public.events (workspace_id, session_id, kind, payload)
+  select id, (select id from bsess2), 'prompt', '{"text":"Plot the latency histogram for the reranker"}' from public.workspaces;
+select public.start_task((select id from bsess2), 'Summarize the related work on dense retrieval');
+insert into public.events (workspace_id, session_id, kind, payload)
+  select id, (select id from bsess2), 'prompt', '{"text":"Summarize the related work on dense retrieval"}' from public.workspaces;
+insert into public.events (workspace_id, session_id, kind, payload)
+  select id, (select id from bsess2), 'reply', '{"summary":"Wrote up the prior literature section."}' from public.workspaces;
+select public.finish_task((select id from bsess2));
+select public.start_task((select id from bsess2), 'Fix typos in the abstract wording');
+insert into public.events (workspace_id, session_id, kind, payload)
+  select id, (select id from bsess2), 'prompt', '{"text":"Fix typos in the abstract wording"}' from public.workspaces;
+reset role;
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000a');
+create temp table hist as
+  select * from public.find_overlap((select id from public.workspaces), 'plot a latency histogram of the reranker', (select id from asess))
+   where kind = 'prompt';
+create temp table hist2 as
+  select * from public.find_overlap((select id from public.workspaces), 'summarize related work about dense retrieval', (select id from asess))
+   where kind = 'prompt';
+select is((select outcome from hist), null, 'an interrupted request doesn''t borrow a later turn''s outcome');
+select is((select active from hist), false, 'an old request isn''t "still being worked on" because its session has a new task');
+select is((select outcome from hist2), 'Wrote up the prior literature section.', 'a finished request shows its own outcome');
+select is((select count(*)::int from public.find_overlap((select id from public.workspaces), 'fix the typos in abstract wording', (select id from asess))
+            where active), 1, 'the current task matches as live, once per session');
+reset role;
+
+-- one session with many matches can't crowd out another session's match
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000b');
+insert into public.events (workspace_id, session_id, kind, payload)
+  select w.id, (select id from bsess2), 'prompt', jsonb_build_object('text', 'Tune the batch size of the indexing job, attempt ' || g)
+    from public.workspaces w, generate_series(1, 6) g;
+-- a public prompt that was interrupted, then a private turn in the same session
+select public.start_task((select id from bsess), 'Benchmark the indexing job memory usage');
+insert into public.events (workspace_id, session_id, kind, payload)
+  select id, (select id from bsess), 'prompt', '{"text":"Benchmark the indexing job memory usage"}' from public.workspaces;
+select public.start_task((select id from bsess), null);
+reset role;
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000a');
+select is((select count(distinct session_id)::int from public.find_overlap((select id from public.workspaces),
+  'tune the indexing job batch size and memory usage', (select id from asess))), 2,
+  'each matching session gets a result, however many matches one session has');
+select is((select active from public.find_overlap((select id from public.workspaces),
+  'benchmark memory usage of the indexing job', (select id from asess)) where session_id = (select id from bsess)), false,
+  'an interrupted public prompt isn''t "still being worked on" during a later private turn');
+reset role;
+
+-- chat tasks end on their own after 10 quiet minutes; Claude Code tasks after an hour
+update public.sessions set client = 'claude-chat', last_seen_at = now() - interval '11 minutes' where id = (select id from bsess2);
+select ok(not private.task_is_live((select s from public.sessions s where id = (select id from bsess2))),
+  'a chat task with no activity for 10 minutes is no longer live');
+update public.sessions set client = 'claude-code' where id = (select id from bsess2);
+select ok(private.task_is_live((select s from public.sessions s where id = (select id from bsess2))),
+  'a Claude Code task stays live for up to an hour');
 
 select * from finish();
 rollback;

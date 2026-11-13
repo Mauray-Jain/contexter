@@ -110,7 +110,6 @@ export async function watch(opts: { workspace?: string; notify?: boolean }) {
   const { data } = await sb.auth.getSession();
   sb.realtime.setAuth(data.session!.access_token);
   const notify = opts.notify && has("notify-send");
-  console.log(`Watching ${ctx.ws.slug}… (Ctrl-C to stop)`);
   sb.channel(`feed-${ctx.ws.id}`)
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "events", filter: `workspace_id=eq.${ctx.ws.id}` },
       (msg: { new: core.Event }) => {
@@ -120,6 +119,10 @@ export async function watch(opts: { workspace?: string; notify?: boolean }) {
         console.log(line);
         if (notify) spawnSync("notify-send", ["contexter", line.replace(/^• /, "")]);
       })
-    .subscribe((status: string) => { if (status === "CHANNEL_ERROR") console.error("realtime connection failed"); });
+    .subscribe((status: string) => {
+      // Announce only once the subscription is live, so nothing posted after this line is missed.
+      if (status === "SUBSCRIBED") console.log(`Watching ${ctx.ws.slug}… (Ctrl-C to stop)`);
+      if (status === "CHANNEL_ERROR") console.error("realtime connection failed");
+    });
   await new Promise(() => {}); // run until interrupted
 }

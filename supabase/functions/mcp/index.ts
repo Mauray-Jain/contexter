@@ -41,13 +41,24 @@ function buildServer(db: core.Db, userId: string, client: core.Client) {
   server.registerTool("sync", {
     title: "Sync with the team",
     description: "Call this FIRST in every reply. Returns what teammates (and their Claudes) did since you last " +
-      "looked, who is working on what right now, and any messages for this user.",
-    inputSchema: z.object({ workspace }),
-    annotations: { readOnlyHint: true },
-  }, async ({ workspace }) => run(workspace, async (ctx) => {
-    const [here, hint] = await Promise.all([core.presence(ctx), core.compactionHint(ctx)]);
+      "looked, who is working on what right now, and any messages for this user. Pass user_request so teammates " +
+      "see what you're working on and so you're warned if a teammate already asked for or did the same work.",
+    inputSchema: z.object({
+      workspace,
+      user_request: z.string().optional().describe(
+        "The user's message in a sentence (verbatim if short). Omit if they started it with !private."),
+    }),
+  }, async ({ workspace, user_request }) => run(workspace, async (ctx) => {
+    // No request means a !private turn (or one Claude didn't describe): the previous task is over
+    // either way, so show this turn as private work rather than leaving the old task live.
+    const request = user_request?.trim() ?? "";
+    await core.startTask(ctx, request || null);
+    const [here, hint, overlap] = await Promise.all([
+      core.presence(ctx), core.compactionHint(ctx), request ? core.overlapWarning(ctx, request) : "",
+    ]);
     const delta = await core.feedDelta(ctx);
     return [
+      overlap,
       delta || `No new activity in ${ctx.ws.slug} since you last looked.`,
       here.length ? `Right now:\n${here.map((l) => `- ${l}`).join("\n")}` : "",
       hint,
@@ -75,6 +86,7 @@ function buildServer(db: core.Db, userId: string, client: core.Client) {
   }, async ({ workspace, user_request, summary }) => run(workspace, async (ctx) => {
     await core.postPrompt(ctx, user_request);
     await core.postReply(ctx, { summary });
+    await core.finishTask(ctx);
     return "Shared with the team.";
   }));
 

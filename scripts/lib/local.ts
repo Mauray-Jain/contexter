@@ -26,6 +26,9 @@ async function codeFor(email: string): Promise<string> {
 }
 
 export async function signIn(email: string): Promise<{ sb: SupabaseClient; token: string; userId: string }> {
+  // Callers often run hooks with spawnSync first, which blocks the event loop while the server closes
+  // idle keep-alive sockets; yield so undici sees those closes instead of reusing a dead socket.
+  await new Promise((r) => setTimeout(r, 10));
   const { url, key } = localEnv();
   const sb = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
   await fetch(`${MAIL}/search?query=${encodeURIComponent(`to:${email}`)}`, { method: "DELETE" });

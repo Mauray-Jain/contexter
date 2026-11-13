@@ -139,6 +139,21 @@ await step("post_turn reaches teammates as one conversation", async () => {
   assert.match(r.text, /alice · .* · → their Claude: Rewrote the method intro/);
 });
 
+await step("chat: sync with user_request shows the task live and warns about duplicates", async () => {
+  await A.call("sync", { user_request: "Add an ablation table comparing reranker depth on MS MARCO" });
+  const b = await B.call("sync", { user_request: "make an ablation table comparing the reranker depth" });
+  assert.match(b.text, /── possible duplicate work ──/);
+  assert.match(b.text, /alice · .* · asked "Add an ablation table comparing reranker depth on MS MARCO" \(still working on it\)/);
+  assert.match(b.text, /alice is working on "Add an ablation table comparing reranker depth on MS MARCO"/);
+  await A.call("post_turn", { user_request: "Add an ablation table comparing reranker depth on MS MARCO", summary: "Added Table 3: reranker depth ablation." });
+  assert.doesNotMatch((await B.call("sync")).text, /alice is working on/, "post_turn finishes the task");
+  await A.call("sync", { user_request: "Rename the reranker variables in the method section" });
+  await A.call("sync"); // a !private turn: no user_request
+  const after = (await B.call("sync")).text;
+  assert.match(after, /alice is working on something private/);
+  assert.doesNotMatch(after, /Rename the reranker/, "the previous task doesn't stay live during a private turn");
+});
+
 await step("search, history and diff", async () => {
   await A.call("write_unit", { ref: "sections/method", content: "# Method\n\nWe use dense retrieval with re-ranking.", expected_version: 1, summary: "Add re-ranking" });
   assert.match((await B.call("search", { query: "re-ranking" })).text, /\[unit\] sections\/method/);

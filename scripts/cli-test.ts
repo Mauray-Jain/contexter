@@ -93,12 +93,12 @@ await step("watch streams teammates' events live", async () => {
   const child = spawn("node", [CLI, "watch"], { cwd: join(root, "writer"), env: env("writer") });
   let out = "";
   child.stdout.on("data", (d) => (out += d));
-  for (let i = 0; i < 50 && !out.includes("Watching"); i++) await new Promise((r) => setTimeout(r, 100));
-  await new Promise((r) => setTimeout(r, 1500)); // let the realtime subscription settle
+  // watch prints "Watching" once the realtime subscription is live; CI runners can be slow to get there.
+  for (let i = 0; i < 300 && !out.includes("Watching"); i++) await new Promise((r) => setTimeout(r, 100));
   const t = await signIn(`teammate-${run}@cli.local`);
   const tctx = await core.loadCtx(t.sb, t.userId, { workspace: `${slug}-research-paper`.slice(0, 48), session: null });
   await core.mention(tctx, ["writer"], "watch me arrive");
-  for (let i = 0; i < 50 && !out.includes("watch me arrive"); i++) await new Promise((r) => setTimeout(r, 100));
+  for (let i = 0; i < 150 && !out.includes("watch me arrive"); i++) await new Promise((r) => setTimeout(r, 100));
   child.kill();
   assert.match(out, /teammate · .* · to @writer: "watch me arrive"/);
 });
