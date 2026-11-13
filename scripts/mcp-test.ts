@@ -56,7 +56,8 @@ await B.call("sync");
 
 await step("server lists tools, prompts and resources", async () => {
   const tools = (await A.client.listTools()).tools.map((t) => t.name);
-  for (const t of ["sync", "resume", "post_turn", "read_unit", "write_unit", "record", "why", "search", "mention", "compact_memory"]) {
+  for (const t of ["sync", "resume", "post_turn", "read_unit", "write_unit", "record", "why", "search", "mention", "compact_memory",
+    "start_run", "update_run", "runs", "watch_run", "handoff", "resolve_handoff"]) {
     assert.ok(tools.includes(t), `missing tool ${t}`);
   }
   const prompts = (await A.client.listPrompts()).prompts.map((p) => p.name);
@@ -181,6 +182,48 @@ await step("prompts and resources", async () => {
 await step("feed is empty when nothing new happened", async () => {
   await B.call("sync");
   assert.match((await B.call("sync")).text, /No new activity/);
+});
+
+await step("runs: everyone sees a run live, and its end reaches its watchers", async () => {
+  assert.match((await A.call("start_run", { title: "stress test", host: "watermax", watchers: ["bob"] })).text, /Registered run #1\b/);
+  let b = (await B.call("sync")).text;
+  assert.match(b, /alice · just now · started run #1 "stress test" on watermax \(watching: @bob\)  ← mentions you/);
+  assert.match(b, /── runs .*──\n• run #1 · alice · "stress test" on watermax · running \d+s · last checked just now \(you're watching\)/);
+  await A.call("update_run", { run: 1, progress: "step 1200/5000" });
+  assert.match((await B.call("sync")).text, /run #1 · alice .* running .* · step 1200\/5000/);
+  await A.call("update_run", { run: 1, status: "failed", exit_code: 137, progress: "Killed", log_tail: "step 1300/5000\nKilled" });
+  b = (await B.call("sync")).text;
+  assert.match(b, /run #1 "stress test" on watermax failed \(exit 137\) after \d+s; last: "Killed"  ← mentions you/);
+  assert.match(b, /run #1 · alice · "stress test" on watermax · FAILED \(exit 137\) just now · last: "Killed" \(you're watching\)/);
+  const detail = (await B.call("runs", { run: 1 })).text;
+  assert.match(detail, /watching: bob/);
+  assert.match(detail, /log tail ──────\nstep 1300\/5000\nKilled/);
+});
+
+await step("handoff: alice's unfinished work goes to bob's Claude, with her locks and runs", async () => {
+  await A.call("claim_unit", { ref: "sections/results" });
+  await A.call("start_run", { title: "training", host: "watermax" });
+  const h = await A.call("handoff", {
+    to: "bob", title: "Finish the results section",
+    summary: "Training (run #2) is going; results section has the table but no discussion yet.",
+    next_steps: "1. Wait for run #2. 2. Add the numbers to the table. 3. Write the discussion.",
+    files: ["sections/results"],
+  });
+  assert.match(h.text, /Handoff #1 is waiting for @bob.*They now watch your running #2/s);
+  let b = (await B.call("sync")).text;
+  assert.match(b, /^── handed to you ──\nhandoff #1 from alice · just now · "Finish the results section"/);
+  assert.match(b, /Next steps: 1\. Wait for run #2/);
+  assert.match(b, /run #2 · alice · "training" on watermax · running .*\(you're watching\)/);
+  assert.match((await B.call("resolve_handoff", { handoff: 1, action: "accept" })).text, /You took over handoff #1/);
+  assert.match((await B.call("read_unit", { ref: "sections/results" })).text, /locked by bob/);
+  assert.match((await A.call("sync")).text, /bob · just now · took over handoff #1 "Finish the results section"  ← mentions you/);
+  b = (await B.call("sync")).text;
+  assert.doesNotMatch(b, /handed to you/, "an accepted handoff isn't offered again");
+  assert.equal((await B.call("resolve_handoff", { handoff: 1, action: "decline" })).isError, true);
+  await B.call("release_unit", { ref: "sections/results" });
+  await A.call("update_run", { run: 2, status: "cancelled" });
+  await A.call("sync");
+  await B.call("sync");
 });
 
 await step("outsiders can't reach the workspace", async () => {

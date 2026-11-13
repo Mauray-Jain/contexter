@@ -103,6 +103,41 @@ await step("watch streams teammates' events live", async () => {
   assert.match(out, /teammate · .* · to @writer: "watch me arrive"/);
 });
 
+await step("run reports a job's progress, log and exit to the team", async () => {
+  const job = `for (let i = 1; i <= 4; i++) setTimeout(() => console.log("\\x1b[32mstep " + i + "/4\\x1b[0m"), i * 150);
+setTimeout(() => { console.error("boom"); process.exit(3); }, 800);`;
+  const r = spawnSync("node", [CLI, "run", "-t", "soak test", "-w", "teammate", "--", "node", "-e", job], {
+    cwd: join(root, "writer"), env: { ...env("writer"), CONTEXTER_RUN_HEARTBEAT_MS: "100" }, encoding: "utf8",
+  });
+  assert.equal(r.status, 3, "the job's exit code is passed on");
+  assert.match(r.stdout, /step 4\/4/, "output passes through");
+  assert.match(r.stderr, /\[contexter\] run #(\d+) .*\n[\s\S]*run #\1 failed \(exit 3\)/);
+  const n = Number(/run #(\d+)/.exec(r.stderr)![1]);
+  const reported = await core.getRun(ctx, n);
+  assert.equal(reported.status, "failed");
+  assert.equal(reported.exit_code, 3);
+  assert.equal(reported.reporter, "wrapper");
+  assert.equal(reported.progress, "boom");
+  assert.match(reported.log_tail!, /step 1\/4\nstep 2\/4\nstep 3\/4\nstep 4\/4\nboom/, "the log tail is captured without colour codes");
+  const t = await signIn(`teammate-${run}@cli.local`);
+  const tctx = await core.loadCtx(t.sb, t.userId, { workspace: ctx.ws.slug, session: null });
+  const feed = await core.feedDelta(tctx);
+  assert.match(feed, new RegExp(`writer · .* · run #${n} "soak test" on \\S+ failed \\(exit 3\\) after \\d+s; last: "boom"  ← mentions you`));
+  assert.match(cli("writer", ["runs", String(n)]), /log tail ──────\nstep 1\/4/);
+});
+
+await step("Ctrl-C on run cancels the job and says so", async () => {
+  const child = spawn("node", [CLI, "run", "-t", "long one", "--", "sleep 30"], { cwd: join(root, "writer"), env: env("writer") });
+  let err = "";
+  child.stderr.on("data", (d) => (err += d));
+  for (let i = 0; i < 100 && !/run #\d+/.test(err); i++) await new Promise((r) => setTimeout(r, 100));
+  child.kill("SIGINT");
+  const code = await new Promise((r) => child.on("exit", r));
+  assert.notEqual(code, 0);
+  const n = Number(/run #(\d+)/.exec(err)![1]);
+  assert.equal((await core.getRun(ctx, n)).status, "cancelled");
+});
+
 await step("chat skill packages as a zip", () => {
   const zip = join(root, "skill.zip");
   const out = cli("writer", ["install", "chat", "-o", zip]);

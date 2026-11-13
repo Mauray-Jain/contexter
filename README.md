@@ -132,10 +132,13 @@ Just talk to Claude. Useful phrases and commands:
 | "@priya can you check Table 2?" | Priya's Claude raises it first on her next message |
 | `!private …` | That turn isn't shared |
 | `contexter watch --notify` | Live feed in a terminal, with desktop notifications |
+| `contexter run -t "stress test" -w krish -- ./stress.sh` | Run a long job where the team can see it: progress, log tail and exit code, heartbeat every minute; krish hears when it ends |
+| "let krish watch run 12" | `watch_run`: krish's Claude tells krish now and when it ends |
+| "my limit is running out, hand this to krish" | `handoff`: krish's Claude brings it up first; accepting moves your locks and runs to krish |
 | `contexter export --format pdf --with-reasoning` | The paper, with a reasoning appendix |
 | `contexter mirror ../paper-backup` | Plain-file git backup of everything |
 
-Other commands: `status`, `feed`, `memory`, `search`, `why`, `workspaces`, `use`, `templates`, `uninstall`.
+Other commands: `runs [n] [--watch]`, `handoffs [n] [--accept|--decline]`, `status`, `feed`, `memory`, `search`, `why`, `workspaces`, `use`, `templates`, `uninstall`.
 
 ## Development
 
