@@ -377,7 +377,7 @@ export interface Run {
   title: string;
   host: string | null;
   command: string | null;
-  reporter: "wrapper" | "claude";
+  reporter: "wrapper" | "claude" | "modal";
   status: "running" | "succeeded" | "failed" | "cancelled";
   progress: string | null;
   log_tail: string | null;
@@ -385,6 +385,17 @@ export interface Run {
   started_at: string;
   updated_at: string;
   finished_at: string | null;
+  external: { modal?: ModalJob };
+  watcher_user: string | null;
+  watched_at: string | null;
+  watch_error: string | null;
+}
+
+// A job running on Modal: enough to find it again from any machine with that Modal profile.
+export interface ModalJob {
+  app_id: string;
+  profile?: string;
+  environment?: string;
 }
 
 export const RUN_STATUSES = ["running", "succeeded", "failed", "cancelled"] as const;
@@ -394,7 +405,7 @@ const HEARTBEAT_STALE_MS = 5 * 60_000;
 const RUN_RECENT_MS = 2 * 60 * 60_000;
 
 export async function startRun(ctx: Ctx, run: {
-  title: string; host?: string; command?: string; watchers?: string[]; reporter?: "wrapper" | "claude";
+  title: string; host?: string; command?: string; watchers?: string[]; reporter?: "wrapper" | "claude" | "modal";
 }): Promise<Run> {
   return unwrap(await ctx.db.rpc("start_run", {
     p_workspace: ctx.ws.id, p_title: run.title, p_host: run.host ?? null, p_command: run.command ?? null,
@@ -408,13 +419,31 @@ export async function getRun(ctx: Ctx, number: number): Promise<Run> {
   return r;
 }
 
-export async function updateRun(ctx: Ctx, runId: string, report: {
+export async function updateRun(ctx: Pick<Ctx, "db">, runId: string, report: {
   status?: string; progress?: string; logTail?: string; exitCode?: number;
 }): Promise<Run> {
   return unwrap(await ctx.db.rpc("update_run", {
     p_run: runId, p_status: report.status ?? null, p_progress: report.progress ?? null,
     p_log_tail: report.logTail ?? null, p_exit_code: report.exitCode ?? null,
   }).single());
+}
+
+// Record the Modal job behind a run. watch: this user's machine watches it from now on.
+export async function setRunModal(ctx: Ctx, runId: string, job: ModalJob, watch = false): Promise<Run> {
+  return unwrap(await ctx.db.rpc("set_run_modal", {
+    p_run: runId, p_app_id: job.app_id, p_profile: job.profile ?? null, p_environment: job.environment ?? null,
+    p_watch: watch,
+  }).single());
+}
+
+// A watcher's check-in on a Modal job (error: why it couldn't look). false: no longer ours to watch.
+export async function reportRunWatch(db: Db, runId: string, error?: string): Promise<boolean> {
+  return unwrap(await db.rpc("report_run_watch", { p_run: runId, p_error: error ?? null })) === true;
+}
+
+// Running Modal jobs this user's machine should watch, across all their workspaces.
+export async function modalRunsToWatch(db: Db, userId: string): Promise<Run[]> {
+  return unwrap(await db.from("runs").select("*").eq("watcher_user", userId).eq("reporter", "modal").eq("status", "running"));
 }
 
 export async function watchRun(ctx: Ctx, number: number, handles: string[] = []) {
@@ -430,16 +459,36 @@ async function watchedRunIds(ctx: Ctx): Promise<Set<string>> {
   return new Set(rows.map((r) => r.run_id));
 }
 
+// How a running job is being looked after, as a suffix for its line.
+function runHealth(ctx: Ctx, r: Run): string {
+  const silent = Date.now() - new Date(r.updated_at).getTime();
+  const modal = r.external?.modal;
+  if (r.reporter === "claude") return ` · last checked ${ago(r.updated_at)}`;
+  if (r.reporter === "wrapper") {
+    if (silent <= HEARTBEAT_STALE_MS) return "";
+    return modal
+      ? ` · NO HEARTBEAT for ${duration(silent / 1000)}: the machine that started it is gone, but the Modal job may still be ` +
+        "running. Nobody is watching it: hand it off (handoff) so a teammate's machine takes over watching it"
+      : ` · NO HEARTBEAT for ${duration(silent / 1000)}: the job or its machine may have died`;
+  }
+  // Modal job watched from someone's machine.
+  if (!r.watcher_user) return " · NOBODY IS WATCHING this Modal job: hand it off so a teammate's machine watches it";
+  const by = r.watcher_user === ctx.userId ? "your machine" : `${ctx.handles.get(r.watcher_user) ?? "someone"}'s machine`;
+  if (r.watch_error) return ` · ${by} can't check it: ${truncate(r.watch_error, 160)}`;
+  if (!r.watched_at) return ` · waiting for ${by} to start watching it`;
+  const unseen = Date.now() - new Date(r.watched_at).getTime();
+  if (unseen > HEARTBEAT_STALE_MS) return ` · ${by} hasn't checked it for ${duration(unseen / 1000)} (its watcher isn't running)`;
+  return ` · watched by ${by}, checked ${ago(r.watched_at)}`;
+}
+
 function runLine(ctx: Ctx, r: Run, watched: boolean): string {
   const who = r.started_by === ctx.userId ? "you" : ctx.handles.get(r.started_by) ?? "someone";
-  const where = r.host ? ` on ${r.host}` : "";
+  const modal = r.external?.modal;
+  const where = modal ? ` on Modal (${modal.app_id}${modal.profile ? `, profile ${modal.profile}` : ""})` : r.host ? ` on ${r.host}` : "";
   const head = `run #${r.number} · ${who} · "${truncate(r.title, 120)}"${where}`;
   const mark = watched ? " (you're watching)" : "";
   if (r.status === "running") {
-    const silent = Date.now() - new Date(r.updated_at).getTime();
-    const health = r.reporter === "wrapper" && silent > HEARTBEAT_STALE_MS
-      ? ` · NO HEARTBEAT for ${duration(silent / 1000)}: the job or its machine may have died`
-      : r.reporter === "claude" ? ` · last checked ${ago(r.updated_at)}` : "";
+    const health = runHealth(ctx, r);
     const progress = r.progress ? ` · ${truncate(r.progress, 160)}` : "";
     return `${head} · running ${duration((Date.now() - new Date(r.started_at).getTime()) / 1000)}${progress}${health}${mark}`;
   }
@@ -490,7 +539,9 @@ export async function runDetail(ctx: Ctx, number: number): Promise<string> {
   return [
     runLine(ctx, r, watchers.some((w) => w.user_id === ctx.userId)),
     r.command ? `command: ${r.command}` : "",
-    `started ${new Date(r.started_at).toISOString()} · last report ${ago(r.updated_at)} · reported by ${r.reporter === "wrapper" ? "contexter run (heartbeat every minute)" : "Claude"}`,
+    `started ${new Date(r.started_at).toISOString()} · last report ${ago(r.updated_at)} · reported by ${
+      r.reporter === "wrapper" ? "contexter run (heartbeat every minute)"
+        : r.reporter === "modal" ? "a contexter watcher polling Modal every minute" : "Claude"}`,
     names.length ? `watching: ${names.join(", ")}` : "",
     r.log_tail ? `\n────── log tail ──────\n${r.log_tail}` : "(no log captured)",
   ].filter(Boolean).join("\n");
@@ -532,16 +583,28 @@ export async function resolveHandoff(ctx: Ctx, number: number, action: "accept" 
   const row = unwrap(await ctx.db.rpc("resolve_handoff", { p_handoff: h.id, p_action: status, p_session: ctx.session ?? null })
     .single()) as Handoff;
   if (action !== "accept") return `Handoff #${number} ${status}.`;
-  return [`You took over handoff #${number}. Here it is again:`, "", handoffText(ctx, row)].join("\n");
+  const modal = (await modalRunsToWatch(ctx.db, ctx.userId)).filter((r) => r.external?.modal);
+  return [
+    `You took over handoff #${number}. Here it is again:`, "", handoffText(ctx, row, []),
+    modal.length
+      ? `\nThis user's machine now watches the Modal job(s) ${modal.map((r) => `run #${r.number} (${r.external.modal!.app_id})`).join(", ")}. ` +
+        "In Claude Code the contexter watcher starts by itself at the end of this turn; anywhere else, run " +
+        "`contexter modal daemon` in a folder where the modal CLI works. It needs the same Modal profile."
+      : "",
+  ].filter(Boolean).join("\n");
 }
 
-function handoffText(ctx: Ctx, h: Handoff): string {
+function handoffText(ctx: Ctx, h: Handoff, modal: Run[]): string {
   const from = ctx.handles.get(h.from_user) ?? "someone";
   return [
     `handoff #${h.number} from ${from} · ${ago(h.created_at)}${h.to_user ? "" : " · open to anyone"} · "${h.title}"`,
     `Where it stands: ${h.summary}`,
     h.next_steps ? `Next steps: ${h.next_steps}` : "",
     h.files.length ? `Files: ${h.files.join(", ")}` : "",
+    modal.length
+      ? `Modal jobs this user's machine will watch on accepting: ${modal.map((r) =>
+        `run #${r.number} "${truncate(r.title, 80)}" (${r.external.modal!.app_id}${r.external.modal!.profile ? `, profile ${r.external.modal!.profile}` : ""})`).join("; ")}`
+      : "",
   ].filter(Boolean).join("\n");
 }
 
@@ -550,9 +613,14 @@ export async function handoffsBlock(ctx: Ctx): Promise<string> {
   const rows = unwrap(await ctx.db.from("handoffs").select("*").eq("workspace_id", ctx.ws.id).eq("status", "open")
     .neq("from_user", ctx.userId).or(`to_user.eq.${ctx.userId},to_user.is.null`).order("number")) as Handoff[];
   if (!rows.length) return "";
+  // The senders' running Modal jobs, which move to the reader's watcher on accepting.
+  const modal = unwrap(await ctx.db.from("runs").select("*").eq("workspace_id", ctx.ws.id).eq("status", "running")
+    .not("external->modal", "is", null)) as Run[];
+  const movesWith = (h: Handoff) => modal.filter((r) =>
+    r.watcher_user === h.from_user || (!r.watcher_user && r.started_by === h.from_user));
   return [
     "── handed to you ──",
-    ...rows.slice(0, 3).map((h) => handoffText(ctx, h)).join("\n\n").split("\n"),
+    ...rows.slice(0, 3).map((h) => handoffText(ctx, h, movesWith(h))).join("\n\n").split("\n"),
     ...(rows.length > 3 ? [`… ${rows.length - 3} more open handoffs.`] : []),
     "A teammate passed this unfinished work to this user's Claude (for example because their usage limit ran out). " +
     "Bring it up first. If the user wants to take it over, call resolve_handoff with action accept (that moves the " +

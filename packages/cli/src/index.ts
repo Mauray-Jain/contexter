@@ -9,6 +9,7 @@ import { runHook } from "./hooks.ts";
 import { chatInstructions, installCode, packageSkill, uninstallCode } from "./install.ts";
 import { cliCtx, exportWorkspace, mirror, watch } from "./workspace.ts";
 import { runJob } from "./run.ts";
+import { activeModalProfile, ensureModalDaemon, modalDaemon } from "./modal.ts";
 import { projectWorkspace } from "./hooks.ts";
 
 const program = new Command("contexter")
@@ -207,6 +208,33 @@ program.command("runs")
     console.log(await core.runDetail(ctx, n));
   });
 
+const modal = program.command("modal").description("Watch Modal jobs that run detached from this machine");
+modal.command("track")
+  .description("Have this machine watch a detached Modal job (reports progress, log tail and the end to the team)")
+  .argument("<app-id>", "the Modal app id, ap-…")
+  .option("-t, --title <title>", "what it is (for a new run)")
+  .option("--run <number>", "attach the job to this existing run instead of starting a new one")
+  .option("--profile <name>", "Modal profile it runs under (defaults to your active profile)")
+  .option("--env <name>", "Modal environment, if not the default")
+  .option("-w, --watch <handles...>", "teammates who should follow it")
+  .action(async (appId: string, opts: { title?: string; run?: string; profile?: string; env?: string; watch?: string[] }) => {
+    const ctx = await cliCtx(projectWorkspace(process.cwd()));
+    const job = { app_id: appId, profile: opts.profile ?? activeModalProfile(), environment: opts.env };
+    const run = opts.run
+      ? await core.getRun(ctx, Number(opts.run.replace(/^#/, "")))
+      : await core.startRun(ctx, {
+        title: opts.title ?? `Modal ${appId}`, host: "Modal", reporter: "modal",
+        watchers: (opts.watch ?? []).map((h) => h.replace(/^@/, "")),
+      });
+    await core.setRunModal(ctx, run.id, job, true);
+    await ensureModalDaemon(ctx.db, ctx.userId, process.cwd());
+    console.log(`This machine now watches ${appId} as run #${run.number}${job.profile ? ` (profile ${job.profile})` : ""}. ` +
+      "The watcher runs in the background and stops once nothing is left to watch.");
+  });
+modal.command("daemon")
+  .description("Run the Modal watcher in the foreground (Claude Code's hooks start it in the background)")
+  .action(() => modalDaemon());
+
 program.command("handoffs")
   .description("Open handoffs you could take over, or accept/decline one")
   .argument("[number]", "a handoff number")
@@ -215,7 +243,11 @@ program.command("handoffs")
   .action(async (number: string | undefined, opts: { accept?: boolean; decline?: boolean }) => {
     const ctx = await cliCtx(projectWorkspace(process.cwd()));
     if (number && (opts.accept || opts.decline)) {
-      return console.log(await core.resolveHandoff(ctx, Number(number.replace(/^#/, "")), opts.accept ? "accept" : "decline"));
+      console.log(await core.resolveHandoff(ctx, Number(number.replace(/^#/, "")), opts.accept ? "accept" : "decline"));
+      if (opts.accept && await ensureModalDaemon(ctx.db, ctx.userId, process.cwd())) {
+        console.log("Started this machine's Modal watcher in the background.");
+      }
+      return;
     }
     console.log(await core.handoffsBlock(ctx) || "No open handoffs for you.");
   });
