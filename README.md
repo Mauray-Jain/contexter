@@ -121,6 +121,47 @@ contexter install chat
 It packages the skill and prints the steps: add the MCP URL as a custom connector, sign in and
 approve, then upload the skill. Start any chat with "catch me up".
 
+### 4. Updating
+
+After a change is merged to `main`, the backend comes first, then every member.
+
+**Backend** (the person who set it up), from an up-to-date `main`. Deploying from an older branch
+would roll the MCP server back.
+
+```bash
+git checkout main && git pull
+```
+
+```bash
+npx supabase db push --dry-run
+```
+
+Check it lists only the new migrations, then apply them and redeploy the MCP server:
+
+```bash
+npx supabase db push
+```
+
+```bash
+npx supabase functions deploy mcp --no-verify-jwt
+```
+
+**Each member**, on every machine:
+
+```bash
+cd <your contexter clone> && git checkout main && git pull && npm install && npm run build
+```
+
+Then, in each project folder connected to the workspace:
+
+```bash
+contexter install code --workspace <slug>
+```
+
+The hooks call the built CLI, so open Claude Code sessions pick up the new build on their next
+message. Re-running `install code` adds any hooks a new version needs; your `.mcp.json` stays as
+it is. Claude chat needs nothing unless a release says to upload the skill again.
+
 ## Everyday use
 
 Just talk to Claude. Useful phrases and commands:
