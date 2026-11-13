@@ -6,6 +6,8 @@
 //   PostToolUse       → after an edit went through: record the file on this session's task;
 //                       after Claude starts a background command: register it as a run
 //   Stop              → post a summary of Claude's reply, mark the task finished
+// SessionStart, UserPromptSubmit and Stop also start the background Modal watcher when this
+// member's machine has Modal jobs to watch (e.g. right after accepting a handoff).
 //   SessionEnd        → close the session, release its locks
 // Hooks must never get in the way: every failure is logged and the hook exits 0
 // (exit 2 on UserPromptSubmit would block the user's prompt).
@@ -15,6 +17,7 @@ import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import * as core from "../../../supabase/functions/_shared/contexter.ts";
 import { getClient, requireUser } from "./client.ts";
 import { home, loadConfig } from "./config.ts";
+import { ensureModalDaemon } from "./modal.ts";
 
 const CONTEXT_LIMIT = 9500; // Claude Code caps additionalContext at 10,000 characters
 
@@ -99,10 +102,19 @@ async function context(input: HookInput, opts: { create: boolean }) {
   return { ctx, state: readState(input.session_id)! };
 }
 
+// Never let the watcher get in the way of a hook: failures only go to the hook log.
+async function startModalWatcher(ctx: core.Ctx, input: HookInput) {
+  const cwd = input.cwd ?? process.cwd();
+  await ensureModalDaemon(ctx.db, ctx.userId, projectRoot(cwd) ?? cwd).catch((err) => {
+    appendFileSync(join(home, "hooks.log"), `${new Date().toISOString()} modal watcher: ${err instanceof Error ? err.message : err}\n`);
+  });
+}
+
 async function sessionStart(input: HookInput) {
   const c = await context(input, { create: true });
   if (!c) return;
   const { ctx } = c;
+  await startModalWatcher(ctx, input);
   // Mark the backlog as read: the memory context below already covers it.
   await core.feedDelta(ctx, 500);
   const [handed, overview, memory, runs, hint] = await Promise.all([
@@ -121,6 +133,7 @@ async function userPromptSubmit(input: HookInput) {
   const c = await context(input, { create: true });
   if (!c) return;
   const { ctx, state } = c;
+  await startModalWatcher(ctx, input);
   const prompt = input.prompt ?? "";
   const isPrivate = /^\s*!private\b/i.test(prompt);
   writeState(input.session_id, { ...state, private: isPrivate });
@@ -175,6 +188,8 @@ async function stop(input: HookInput) {
   const c = await context(input, { create: false });
   if (!c) return;
   await core.finishTask(c.ctx);
+  // Claude may have accepted a handoff this turn: start watching its Modal jobs now.
+  await startModalWatcher(c.ctx, input);
   if (c.state.private) return;
   const turn = input.transcript_path && existsSync(input.transcript_path)
     ? lastTurn(input.transcript_path) : { text: "", files: [] };

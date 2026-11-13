@@ -2,12 +2,13 @@
 // Run: npm run build && npm run test:cli (with `npm run db:start` up).
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { copyFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CLI, cliRunner } from "./lib/cli.ts";
 import { signIn } from "./lib/local.ts";
 import * as core from "../supabase/functions/_shared/contexter.ts";
+import { activeModalProfile, checkModalJob, parseModalApp } from "../packages/cli/src/modal.ts";
 
 const run = Date.now().toString(36);
 const root = mkdtempSync(join(tmpdir(), "contexter-cli-"));
@@ -136,6 +137,121 @@ await step("Ctrl-C on run cancels the job and says so", async () => {
   assert.notEqual(code, 0);
   const n = Number(/run #(\d+)/.exec(err)![1]);
   assert.equal((await core.getRun(ctx, n)).status, "cancelled");
+});
+
+// A fake modal CLI on PATH-like terms: named `modal`, state in a JSON file the test edits.
+const fakeBin = join(root, "bin");
+mkdirSync(fakeBin, { recursive: true });
+copyFileSync(join(process.cwd(), "scripts/lib/fake-modal.mjs"), join(fakeBin, "modal"));
+chmodSync(join(fakeBin, "modal"), 0o755);
+const modalState = join(root, "modal-state.json");
+const setApp = (id: string, app: Record<string, unknown>) => {
+  const st = JSON.parse(readFileSync(modalState, "utf8"));
+  st.apps[id] = { ...st.apps[id], ...app };
+  writeFileSync(modalState, JSON.stringify(st));
+};
+writeFileSync(modalState, JSON.stringify({ apps: {} }));
+Object.assign(process.env, {
+  FAKE_MODAL_STATE: modalState, CONTEXTER_MODAL_BIN: join(fakeBin, "modal"),
+  CONTEXTER_MODAL_POLL_MS: "200", CONTEXTER_MODAL_IDLE_POLLS: "3",
+});
+async function until<T>(what: string, fn: () => Promise<T | undefined | false>, ms = 30_000): Promise<T> {
+  for (const end = Date.now() + ms; Date.now() < end; await new Promise((r) => setTimeout(r, 150))) {
+    const v = await fn();
+    if (v) return v;
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
+await step("Modal: app ids, profiles and job state are read the way Modal reports them", async () => {
+  assert.deepEqual(parseModalApp("✓ Initialized. View run at https://modal.com/apps/team/main/ap-AbC123xyz"), { app_id: "ap-AbC123xyz" });
+  assert.deepEqual(parseModalApp("View run at https://modal.com/apps/team/staging/ap-AbC123xyz"),
+    { app_id: "ap-AbC123xyz", environment: "staging" });
+  const cfg = join(root, "modal.toml");
+  writeFileSync(cfg, '[alpha]\ntoken_id = "x"\ntoken_secret = "y"\n\n[venice67]\ntoken_id = "x"\ntoken_secret = "y"\nactive = true\n');
+  const saved = process.env.MODAL_PROFILE;
+  delete process.env.MODAL_PROFILE;
+  process.env.MODAL_CONFIG_PATH = cfg;
+  assert.equal(activeModalProfile(), "venice67", "the active profile's name, never its token");
+  delete process.env.MODAL_CONFIG_PATH;
+  if (saved) process.env.MODAL_PROFILE = saved;
+
+  setApp("ap-crash1", { state: "stopped", stopped_by: null, logs: ["epoch 3", "Traceback (most recent call last):", "  File x", "RuntimeError: CUDA out of memory"] });
+  setApp("ap-ok1", { state: "stopped", stopped_by: null, logs: ["epoch 10", "done: acc 0.91"] });
+  setApp("ap-stop1", { state: "stopped", stopped_by: "krish", logs: ["epoch 2"] });
+  setApp("ap-live1", { state: "ephemeral (detached)", stopped_by: null, logs: ["epoch 4/10"] });
+  const cwd = join(root, "writer");
+  assert.equal((await checkModalJob({ app_id: "ap-crash1" }, cwd)).status, "failed");
+  assert.deepEqual(await checkModalJob({ app_id: "ap-ok1" }, cwd), { status: "succeeded", progress: "done: acc 0.91", logTail: "epoch 10\ndone: acc 0.91\n" });
+  assert.equal((await checkModalJob({ app_id: "ap-stop1" }, cwd)).status, "cancelled");
+  assert.equal((await checkModalJob({ app_id: "ap-live1" }, cwd)).progress, "epoch 4/10");
+  await assert.rejects(checkModalJob({ app_id: "ap-live1", profile: "missing" }, cwd), /profile missing: Token not found/);
+});
+
+await step("Modal: a detached job outlives its machine, and the teammate it's handed to watches it", async () => {
+  // writer starts a detached Modal job under contexter run, then the laptop dies (the whole process group).
+  const app = `ap-job${run}`;
+  const wrapper = spawn("node", [CLI, "run", "-t", "train family", "--", join(fakeBin, "modal"), "run", "--detach", "bl_modal.py"], {
+    cwd: join(root, "writer"), env: { ...env("writer"), ...process.env, CONTEXTER_HOME: env("writer").CONTEXTER_HOME, FAKE_MODAL_APP: app, MODAL_PROFILE: "venice67" },
+    detached: true,
+  });
+  let err = "";
+  wrapper.stderr.on("data", (d) => (err += d));
+  const n = await until("the run", async () => Number(/run #(\d+)/.exec(err)?.[1]));
+  const recorded = await until("the Modal app on the run", async () => {
+    const r = await core.getRun(ctx, n);
+    return r.external?.modal ? r : undefined;
+  });
+  assert.deepEqual(recorded.external.modal, { app_id: app, profile: "venice67" }, "app id and profile name, no token");
+  process.kill(-wrapper.pid!, "SIGKILL");
+  setApp(app, { logs: ["epoch 6/10", "epoch 7/10"] });
+
+  // writer hands it to teammate; teammate sees which Modal job moves to their machine.
+  const t = await signIn(`teammate-${run}@cli.local`);
+  const tctx = await core.loadCtx(t.sb, t.userId, { workspace: ctx.ws.slug, session: null });
+  const h = Number(/Handoff #(\d+)/.exec(await core.createHandoff(ctx, {
+    to: "teammate", title: "Watch the family training", summary: "Training runs detached on Modal; my limit is out.",
+  }))![1]);
+  assert.match(await core.handoffsBlock(tctx), new RegExp(`Modal jobs this user's machine will watch on accepting: run #${n} "train family" \\(${app}, profile venice67\\)`));
+
+  // Accepting starts teammate's watcher, which reports what Modal says.
+  const accepted = cli("teammate", ["handoffs", String(h), "--accept"]);
+  assert.match(accepted, new RegExp(`now watches the Modal job\\(s\\) run #${n} \\(${app}\\)`));
+  assert.match(accepted, /Started this machine's Modal watcher/);
+  const watched = await until("the watcher's first check", async () => {
+    const r = await core.getRun(ctx, n);
+    return r.watched_at && r.progress === "epoch 7/10" ? r : undefined;
+  });
+  assert.equal(watched.reporter, "modal");
+  assert.equal(watched.watcher_user, t.userId);
+  // A fresh context: the one above was loaded before teammate joined.
+  const now = await core.loadCtx(w.sb, w.userId, { workspace: ctx.ws.slug, session: null });
+  assert.match(await core.runsBlock(now), new RegExp(`run #${n} · you · "train family" on Modal \\(${app}, profile venice67\\) · running .* · epoch 7/10 · watched by teammate's machine, checked just now`));
+
+  // The job finishes on Modal: the watcher reports it, then stops with nothing left to watch.
+  setApp(app, { state: "stopped", logs: ["epoch 10/10", "done: acc 0.91"] });
+  const done = await until("the end of the job", async () => {
+    const r = await core.getRun(ctx, n);
+    return r.status !== "running" ? r : undefined;
+  });
+  assert.equal(done.status, "succeeded");
+  assert.equal(done.progress, "done: acc 0.91");
+  await until("the watcher to stop", async () => !existsSync(join(root, "teammate", ".home", "modal-daemon.pid")));
+});
+
+await step("Modal: a watcher without the job's profile says so instead of going quiet", async () => {
+  const app = `ap-nokey${run}`;
+  setApp(app, { state: "ephemeral (detached)", stopped_by: null, logs: [] });
+  const out = cli("writer", ["modal", "track", app, "-t", "keyless job", "--profile", "missing"]);
+  const n = Number(/as run #(\d+)/.exec(out)![1]);
+  const r = await until("the watcher's report", async () => {
+    const x = await core.getRun(ctx, n);
+    return x.watch_error ? x : undefined;
+  });
+  assert.match(r.watch_error!, /profile missing: Token not found/);
+  assert.match(await core.runsBlock(ctx), new RegExp(`run #${n} · you · "keyless job" on Modal \\(${app}, profile missing\\) · running .* · your machine can't check it: profile missing: Token not found`));
+  await core.updateRun(ctx, r.id, { status: "cancelled" });
+  await until("the watcher to stop", async () => !existsSync(join(root, "writer", ".home", "modal-daemon.pid")));
 });
 
 await step("chat skill packages as a zip", () => {

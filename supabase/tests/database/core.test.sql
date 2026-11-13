@@ -1,7 +1,7 @@
 -- Access model + concurrency tests for the core schema. Run: npx supabase test db
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(74);
+select plan(83);
 
 -- Three people: alice (owner), bob (editor via invite), carol (viewer via invite), eve (outsider).
 insert into auth.users (id, email) values
@@ -315,6 +315,33 @@ select is((select mentions from public.events where kind = 'handoff' and payload
   array['bob'], 'accepting tells the sender');
 select throws_ok($$ select public.resolve_handoff((select id from h1), 'declined') $$,
   'P0001', null, 'a resolved handoff cannot be resolved again');
+reset role;
+
+-- ── Modal jobs: a handoff moves the watching of the sender's Modal jobs to the recipient
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000b');
+create temp table run3 as select * from public.start_run((select id from public.workspaces), 'detached sweep', 'Modal');
+select is((public.set_run_modal((select id from run3), 'ap-Abc123', 'venice67')).external->'modal',
+  '{"app_id": "ap-Abc123", "profile": "venice67"}'::jsonb, 'a run records its Modal app id and profile name');
+select throws_ok($$ select public.set_run_modal((select id from run3), 'not-an-app') $$,
+  '22023', null, 'anything but a Modal app id is rejected');
+select throws_ok($$ select public.set_run_modal((select id from run3), 'ap-Abc123', 'tok token=secret') $$,
+  '22023', null, 'a profile must be a plain profile name');
+create temp table h2 as
+  select * from public.create_handoff((select id from public.workspaces), 'alice', 'Watch the sweep', 'Sweep runs detached on Modal.');
+reset role;
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000a');
+select public.resolve_handoff((select id from h2), 'accepted');
+select is((select reporter || ' ' || watcher_user from public.runs where id = (select id from run3)),
+  'modal 00000000-0000-0000-0000-00000000000a', 'accepting moves the sender''s Modal job to the recipient''s watcher');
+select is((select watcher_user from public.runs where id = (select id from run2)), null,
+  'jobs without a Modal app aren''t given a watcher');
+select ok(public.report_run_watch((select id from run3)), 'the watcher checks in');
+select ok((select watched_at is not null from public.runs where id = (select id from run3)), 'a check-in is recorded');
+reset role;
+select pg_temp.act_as('00000000-0000-0000-0000-00000000000b');
+select ok(not public.report_run_watch((select id from run3)), 'the previous watcher is told the job isn''t theirs any more');
+select throws_ok($$ update public.runs set watcher_user = auth.uid() $$, '42501', null,
+  'nobody can grab the watching of a job directly');
 reset role;
 
 select * from finish();

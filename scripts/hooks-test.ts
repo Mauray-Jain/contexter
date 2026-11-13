@@ -3,7 +3,7 @@
 // Run: npm run build && npm run test:hooks (with `npm run db:start` up).
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CLI, cliRunner } from "./lib/cli.ts";
@@ -270,6 +270,47 @@ await step("a handoff comes first in the teammate's next message, and they can t
   await core.updateRun(ctx, (await core.getRun(ctx, bgRun)).id, { status: "succeeded", exitCode: 0, progress: "p99 41ms" });
   const after = hook("bob", "UserPromptSubmit", { session_id: "bob-1", prompt: "how did it go?" });
   assert.match(after.context, new RegExp(`run #${bgRun} "Stress test the ingest service" on \\S+ succeeded after \\d+s; last: "p99 41ms"  ← mentions you`));
+});
+
+await step("after Claude accepts a handoff, the next hook starts watching its Modal job", async () => {
+  // A fake modal CLI and a detached job of alice's on it.
+  copyFileSync(join(process.cwd(), "scripts/lib/fake-modal.mjs"), join(root, "modal"));
+  chmodSync(join(root, "modal"), 0o755);
+  const state = join(root, "modal-state.json");
+  const app = `ap-hook${run}`;
+  const setApp = (a: Record<string, unknown>) => writeFileSync(state, JSON.stringify({ apps: { [app]: a } }));
+  setApp({ state: "ephemeral (detached)", stopped_by: null, logs: ["epoch 2/5"] });
+  Object.assign(process.env, {
+    FAKE_MODAL_STATE: state, CONTEXTER_MODAL_BIN: join(root, "modal"),
+    CONTEXTER_MODAL_POLL_MS: "200", CONTEXTER_MODAL_IDLE_POLLS: "3",
+  });
+  const a = await signIn(`alice-${run}@hooks.local`);
+  const actx = await core.loadCtx(a.sb, a.userId, { workspace: slug, session: null });
+  const r = await core.startRun(actx, { title: "detached sweep", host: "Modal" });
+  await core.setRunModal(actx, r.id, { app_id: app, profile: "venice67" });
+  const h = Number(/Handoff #(\d+)/.exec(await core.createHandoff(actx, {
+    to: "bob", title: "Keep an eye on the sweep", summary: "The sweep runs detached on Modal; I'm out of usage.",
+  }))![1]);
+
+  // bob's Claude accepts through MCP (server side, nothing starts locally)…
+  const b = await signIn(`bob-${run}@hooks.local`);
+  const bctx = await core.loadCtx(b.sb, b.userId, { workspace: slug, session: null });
+  assert.match(await core.resolveHandoff(bctx, h, "accept"), /watcher starts by itself at the end of this turn/);
+  // …and the Stop hook at the end of that turn starts bob's watcher.
+  hook("bob", "UserPromptSubmit", { session_id: "bob-1", prompt: "take over the sweep" });
+  hook("bob", "Stop", { session_id: "bob-1", last_assistant_message: "Took over the sweep." });
+  const pid = join(root, "bob/.home/modal-daemon.pid");
+  const log = () => { try { return readFileSync(join(root, "bob/.home/modal-daemon.log"), "utf8"); } catch { return "(no watcher log)"; } };
+  for (let i = 0; i < 200 && !(await core.getRun(actx, r.number)).watched_at; i++) await new Promise((res) => setTimeout(res, 150));
+  const watched = await core.getRun(actx, r.number);
+  assert.equal(watched.watcher_user, b.userId);
+  assert.equal(watched.progress, "epoch 2/5", `the watcher reported; its log:\n${log()}`);
+  assert.ok(existsSync(pid), "bob's watcher is running");
+  setApp({ state: "stopped", stopped_by: null, logs: ["epoch 5/5", "sweep done"] });
+  for (let i = 0; i < 200 && (await core.getRun(actx, r.number)).status === "running"; i++) await new Promise((res) => setTimeout(res, 150));
+  assert.equal((await core.getRun(actx, r.number)).status, "succeeded");
+  for (let i = 0; i < 200 && existsSync(pid); i++) await new Promise((res) => setTimeout(res, 150));
+  assert.ok(!existsSync(pid), "the watcher stops once nothing is left to watch");
 });
 
 await step("same member, other client: alice's chat sees her own Code session", async () => {

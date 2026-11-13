@@ -85,6 +85,12 @@ long ago each one reported.
   Code, background commands are registered automatically; you'll be told the run number.
 - `watch_run` makes teammates follow a run ("let Krish keep an eye on it"): they're told now and
   again when it ends. Pass `watchers` to `start_run` for the same thing up front.
+- **Modal jobs:** `contexter run -- modal run --detach …` also records the Modal app id and
+  profile name. If the machine that started it goes away (laptop closed, limit ran out), the job
+  keeps running on Modal; hand it off and the recipient's machine watches it (progress, logs, how
+  it ended). `contexter modal track <ap-…>` makes this machine watch a job started some other way.
+  "NOBODY IS WATCHING" or "can't check it" on a Modal job needs the user's attention: suggest a
+  handoff, or check that this machine has that Modal profile.
 - **NO HEARTBEAT** on a `contexter run` job means the job or its machine probably died. Say so.
   Raise failed runs the user started or watches. `runs` with a `run` number gives the log tail.
 

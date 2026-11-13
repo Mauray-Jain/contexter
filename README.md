@@ -133,6 +133,8 @@ Just talk to Claude. Useful phrases and commands:
 | `!private …` | That turn isn't shared |
 | `contexter watch --notify` | Live feed in a terminal, with desktop notifications |
 | `contexter run -t "stress test" -w krish -- ./stress.sh` | Run a long job where the team can see it: progress, log tail and exit code, heartbeat every minute; krish hears when it ends |
+| `contexter run -t "family" -- modal run --detach bl_modal.py --task family` | Also records the Modal app id and profile, so if your laptop closes the job can be handed off and watched from a teammate's machine |
+| `contexter modal track ap-… -t "sweep"` | This machine watches a detached Modal job started some other way |
 | "let krish watch run 12" | `watch_run`: krish's Claude tells krish now and when it ends |
 | "my limit is running out, hand this to krish" | `handoff`: krish's Claude brings it up first; accepting moves your locks and runs to krish |
 | `contexter export --format pdf --with-reasoning` | The paper, with a reasoning appendix |
