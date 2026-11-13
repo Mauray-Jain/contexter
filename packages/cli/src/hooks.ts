@@ -11,13 +11,17 @@
 //   SessionEnd        → close the session, release its locks
 // Hooks must never get in the way: every failure is logged and the hook exits 0
 // (exit 2 on UserPromptSubmit would block the user's prompt).
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync, closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync,
+  realpathSync, rmSync, writeFileSync,
+} from "node:fs";
 import { hostname } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, normalize, relative, sep } from "node:path";
 import * as core from "../../../supabase/functions/_shared/contexter.ts";
 import { getClient, requireUser } from "./client.ts";
 import { home, loadConfig } from "./config.ts";
 import { ensureModalDaemon } from "./modal.ts";
+import { lastLine } from "./run.ts";
 
 const CONTEXT_LIMIT = 9500; // Claude Code caps additionalContext at 10,000 characters
 
@@ -33,6 +37,8 @@ interface HookInput {
   reason?: string;
   tool_name?: string;
   tool_input?: Record<string, unknown>;
+  tool_use_id?: string;
+  tool_response?: unknown;
 }
 
 const stateDir = join(home, "sessions");
@@ -53,6 +59,47 @@ function readState(sid: string): SessionState | null {
 function writeState(sid: string, s: SessionState) {
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   writeFileSync(statePath(sid), JSON.stringify(s), { mode: 0o600 });
+}
+
+// The runs of a session's background commands, one small file per key (the tool call's id and the
+// background task's id), so the notification Claude Code sends when a command ends can close its run.
+// One file per key: hooks of the same session can run at once, and none rewrites another's entry.
+interface BgRun { id: string; number: number; keys: string[] }
+const bgDir = (sid: string) => join(stateDir, `${sid.replace(/[^\w-]/g, "_")}.bg`);
+const bgPath = (sid: string, key: string) => join(bgDir(sid), `${key.replace(/[^\w-]/g, "_")}.json`);
+function rememberBgRun(sid: string, run: BgRun) {
+  mkdirSync(bgDir(sid), { recursive: true, mode: 0o700 });
+  for (const k of run.keys) writeFileSync(bgPath(sid, k), JSON.stringify(run), { mode: 0o600 });
+}
+function findBgRun(sid: string, keys: (string | undefined)[]): BgRun | undefined {
+  for (const k of keys) {
+    if (!k) continue;
+    try { return JSON.parse(readFileSync(bgPath(sid, k), "utf8")); } catch { /* not this key */ }
+  }
+  return undefined;
+}
+function forgetBgRun(sid: string, run: BgRun) {
+  for (const k of run.keys) rmSync(bgPath(sid, k), { force: true });
+}
+
+// The end of a regular file, without reading all of it: background jobs can write gigabytes of output.
+// Nothing along the path may be a symbolic link (its real path must be itself), the open neither
+// follows a link nor blocks (a FIFO), and the file opened must be the one checked.
+export function readTail(path: string, bytes: number): string {
+  if (realpathSync(path) !== path) throw new Error(`${path} goes through a symbolic link`);
+  const before = lstatSync(path);
+  if (!before.isFile()) throw new Error(`${path} is not a regular file`);
+  const fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.ino !== before.ino || stat.dev !== before.dev) throw new Error(`${path} changed while opening`);
+    const size = stat.size;
+    const buf = Buffer.alloc(Math.min(size, bytes));
+    const read = readSync(fd, buf, 0, buf.length, size - buf.length);
+    return buf.subarray(0, read).toString("utf8");
+  } finally {
+    closeSync(fd);
+  }
 }
 
 // The folder holding .contexter.json: the project root every member's paths are relative to.
@@ -137,6 +184,11 @@ async function userPromptSubmit(input: HookInput) {
   const prompt = input.prompt ?? "";
   const isPrivate = /^\s*!private\b/i.test(prompt);
   writeState(input.session_id, { ...state, private: isPrivate });
+  // A background command ended: close its run here, so it never depends on Claude remembering to.
+  const closed = await closeBackgroundRuns(ctx, input.session_id, prompt, isPrivate).catch((err) => {
+    appendFileSync(join(home, "hooks.log"), `${new Date().toISOString()} close-run: ${err instanceof Error ? err.message : err}\n`);
+    return "";
+  });
   const shared = !isPrivate && prompt.trim() ? prompt : "";
   const promptEvent = shared ? await core.postPrompt(ctx, shared) : null;
   await core.startTask(ctx, shared || null, promptEvent);
@@ -146,8 +198,69 @@ async function userPromptSubmit(input: HookInput) {
   ]);
   emit("UserPromptSubmit", [
     isPrivate ? "[contexter] This message is private: it is not shared with the team. Don't post it." : "",
-    handed, overlap, delta, now, runs, hint,
+    closed, handed, overlap, delta, now, runs, hint,
   ].filter(Boolean).join("\n\n"));
+}
+
+const NOTIFICATION_STATUS: Record<string, string> = {
+  completed: "succeeded", failed: "failed", killed: "cancelled", stopped: "cancelled", cancelled: "cancelled",
+};
+
+// The background-task notifications in a prompt Claude Code sends when background commands end.
+export function parseTaskNotifications(prompt: string) {
+  const tag = (block: string, name: string) => new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(block)?.[1].trim();
+  return [...prompt.matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/g)].map(([, block]) => {
+    const summary = tag(block, "summary") ?? "";
+    const code = /exit code (-?\d+)/i.exec(summary)?.[1];
+    return {
+      taskId: tag(block, "task-id"), toolUseId: tag(block, "tool-use-id"), outputFile: tag(block, "output-file"),
+      status: NOTIFICATION_STATUS[(tag(block, "status") ?? "").toLowerCase()], exitCode: code == null ? undefined : Number(code),
+    };
+  });
+}
+
+// The output file Claude Code wrote for one of this run's background tasks:
+// <…>/<session id>/tasks/<task id>.output. Anything else named in a notification is not read: a prompt
+// can claim any path, and the tail is shared. readTail then refuses links and anything not a regular file.
+export function trustedOutputFile(path: string | undefined, sid: string, run: { keys: string[] }): string | undefined {
+  if (!path || !isAbsolute(path) || normalize(path) !== path) return undefined;
+  if (basename(dirname(path)) !== "tasks" || basename(dirname(dirname(path))) !== sid) return undefined;
+  const m = /^(.+)\.output$/.exec(basename(path));
+  return m && run.keys.includes(m[1]) ? path : undefined;
+}
+
+// Close the runs of this session's background commands that the prompt's notifications say ended.
+// A run Claude already reported is left as it is (update_run ignores a second report of an end).
+// In a private turn the run is still closed, but none of its output is shared.
+async function closeBackgroundRuns(ctx: core.Ctx, sid: string, prompt: string, isPrivate: boolean): Promise<string> {
+  if (!prompt.includes("<task-notification>")) return "";
+  const lines: string[] = [];
+  for (const n of parseTaskNotifications(prompt)) {
+    const run = findBgRun(sid, [n.toolUseId, n.taskId]);
+    if (!run || !n.status) continue;
+    const row = unwrapRow<{ status: string }>(await ctx.db.from("runs").select("status").eq("id", run.id).maybeSingle());
+    if (row?.status === "running") {
+      let tail = "";
+      // Claude Code ends the output file with its own "[exited with code N]" line: not the job's output.
+      try {
+        const file = isPrivate ? undefined : trustedOutputFile(n.outputFile, sid, run);
+        if (file) tail = readTail(file, 16_384).replace(/\s*\[exited with code -?\d+\]\s*$/, "\n").slice(-4000);
+      } catch { /* output already gone */ }
+      const saved = await core.updateRun(ctx, run.id, {
+        status: n.status, exitCode: n.exitCode, logTail: tail || undefined, progress: lastLine(tail) || undefined,
+      });
+      // Say what was recorded: another report of the end may have got there first.
+      lines.push(`[contexter] Run #${run.number} ended (${saved.status}${saved.exit_code != null ? `, exit ${saved.exit_code}` : ""}) ` +
+        "and is reported to the team; no need to call update_run for it.");
+    }
+    forgetBgRun(sid, run);
+  }
+  return lines.join("\n");
+}
+
+function unwrapRow<T>(res: { data: T | null; error: { message: string } | null }): T | null {
+  if (res.error) throw new Error(res.error.message);
+  return res.data;
 }
 
 // Final assistant text and touched files of the last turn, from the transcript (JSONL).
@@ -270,10 +383,16 @@ async function backgroundCommand(input: HookInput) {
     title: typeof description === "string" && description.trim() ? description : core.truncate(command, 120),
     host: hostname(), command,
   });
-  emit("PostToolUse",
-    `[contexter] This background command is now run #${run.number}, so teammates can see it. When you learn how it ` +
-    `went (its output, or the user tells you), call contexter's update_run with run=${run.number}: status succeeded, ` +
-    "failed or cancelled, exit_code, and a one-line progress. Update progress along the way if it's long.");
+  // Remember it, so the notification Claude Code sends when the command ends closes the run.
+  const response = input.tool_response as { backgroundTaskId?: unknown } | undefined;
+  const keys = [input.tool_use_id, response?.backgroundTaskId].filter((k): k is string => typeof k === "string" && !!k);
+  if (keys.length) rememberBgRun(input.session_id, { id: run.id, number: run.number, keys });
+  emit("PostToolUse", keys.length
+    ? `[contexter] This background command is now run #${run.number}, so teammates can see it. Its end is reported ` +
+      `automatically; if it's long, you can post progress along the way with contexter's update_run (run=${run.number}).`
+    : `[contexter] This background command is now run #${run.number}, so teammates can see it. When you learn how it ` +
+      `went (its output, or the user tells you), call contexter's update_run with run=${run.number}: status succeeded, ` +
+      "failed or cancelled, exit_code, and a one-line progress. Update progress along the way if it's long.");
 }
 
 async function sessionEnd(input: HookInput) {
@@ -283,6 +402,7 @@ async function sessionEnd(input: HookInput) {
   await requireUser(sb);
   await sb.rpc("end_session", { p_session: state.session });
   rmSync(statePath(input.session_id), { force: true });
+  rmSync(bgDir(input.session_id), { recursive: true, force: true });
 }
 
 const handlers: Record<string, (i: HookInput) => Promise<void>> = {

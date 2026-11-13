@@ -2,8 +2,10 @@
 // the installed hook commands exactly as Claude Code does (stdin JSON, stdout JSON).
 // Run: npm run build && npm run test:hooks (with `npm run db:start` up).
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import {
+  chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CLI, cliRunner } from "./lib/cli.ts";
@@ -33,6 +35,22 @@ function hook(who: string, event: string, input: Record<string, unknown>) {
   });
   const output = r.stdout ? JSON.parse(r.stdout).hookSpecificOutput ?? {} : {};
   return { status: r.status, context: output.additionalContext ?? "", output, ms: Date.now() - started, stderr: r.stderr };
+}
+
+// The same, without waiting: to run several hooks at once, as Claude Code can.
+function hookAsync(who: string, event: string, input: Record<string, unknown>): Promise<{ context: string }> {
+  return new Promise((resolve, reject) => {
+    const p = spawn("sh", ["-c", installedHooks(who)[event]], {
+      cwd: join(root, who), env: { ...process.env, CONTEXTER_HOME: join(root, who, ".home") },
+    });
+    let out = "";
+    p.stdout.on("data", (d) => { out += d; });
+    p.on("error", reject);
+    p.on("close", () => {
+      try { resolve({ context: out ? JSON.parse(out).hookSpecificOutput?.additionalContext ?? "" : "" }); } catch (err) { reject(err); }
+    });
+    p.stdin.end(JSON.stringify({ hook_event_name: event, cwd: join(root, who), ...input }));
+  });
 }
 
 function transcript(who: string, turns: { user: string; assistant: string; wrote?: string }[]) {
@@ -253,6 +271,84 @@ await step("a background command Claude starts becomes a run the team sees", () 
   assert.equal(hook("alice", "PostToolUse", { session_id: "alice-bg", tool_name: "Bash",
     tool_input: { command: "./side-project.sh", run_in_background: true } }).context, "");
   hook("alice", "Stop", { session_id: "alice-bg", last_assistant_message: "Started it." });
+});
+
+await step("a background command's run closes itself when Claude Code says the command ended", async () => {
+  // Claude Code writes a background task's output to <tasks folder>/<task id>.output.
+  const tasks = join(realpathSync(root), "alice", "alice-bg2", "tasks");
+  mkdirSync(tasks, { recursive: true });
+  const output = (taskId: string) => join(tasks, `${taskId}.output`);
+  writeFileSync(output("task_a"), "warming up\nrps 500 ok\np99 41ms\n\n[exited with code 3]\n");
+  const notify = (taskId: string, toolUseId: string, status: string, summary: string, file = output(taskId)) =>
+    hook("alice", "UserPromptSubmit", {
+      session_id: "alice-bg2", prompt: `<task-notification>\n<task-id>${taskId}</task-id>\n<tool-use-id>${toolUseId}</tool-use-id>\n` +
+        `<output-file>${file}</output-file>\n<status>${status}</status>\n<summary>${summary}</summary>\n</task-notification>`,
+    });
+  hook("alice", "UserPromptSubmit", { session_id: "alice-bg2", prompt: "Run the soak test" });
+  const start = (toolUseId: string, taskId: string, command: string) => {
+    const r = hook("alice", "PostToolUse", { session_id: "alice-bg2", tool_name: "Bash", tool_use_id: toolUseId,
+      tool_input: { command, description: command, run_in_background: true }, tool_response: { backgroundTaskId: taskId } });
+    assert.match(r.context, /Its end is reported automatically/);
+    return Number(/now run #(\d+)/.exec(r.context)?.[1]);
+  };
+  const failing = start("toolu_a", "task_a", "./soak.sh");
+  const ok = start("toolu_b", "task_b", "./bench.sh");
+  // Matched by the tool call's id; the exit code comes from the summary, the progress from the output.
+  const r = notify("other", "toolu_a", "failed", 'Background command "./soak.sh" failed with exit code 3', output("task_a"));
+  assert.match(r.context, new RegExp(`Run #${failing} ended \\(failed, exit 3\\)`));
+  assert.match(r.context, new RegExp(`run #${failing} · you · "./soak.sh" on \\S+ · FAILED \\(exit 3\\) just now · last: "p99 41ms"`));
+  // Matched by the task's id alone too.
+  assert.match(notify("task_b", "toolu_other", "completed", "completed (exit code 0)").context,
+    new RegExp(`Run #${ok} ended \\(succeeded, exit 0\\)`));
+  // A second notification for a run that's already closed changes nothing.
+  assert.doesNotMatch(notify("task_b", "toolu_b", "failed", "failed with exit code 9").context, /ended \(/);
+  // A run Claude already reported is left alone.
+  const reported = start("toolu_c", "task_c", "./load.sh");
+  const a = await signIn(`alice-${run}@hooks.local`);
+  const ctx = await core.loadCtx(a.sb, a.userId, { workspace: slug, session: null });
+  await core.updateRun(ctx, (await core.getRun(ctx, reported)).id, { status: "cancelled", progress: "stopped by hand" });
+  assert.doesNotMatch(notify("task_c", "toolu_c", "completed", "completed (exit code 0)").context, /ended \(/);
+  const row = await core.getRun(ctx, reported);
+  assert.equal(row.status, "cancelled");
+  assert.equal(row.progress, "stopped by hand");
+  // Two background commands registered at the same moment both close; a huge output is read from its end.
+  const [x, y] = await Promise.all(["x", "y"].map((k) => hookAsync("alice", "PostToolUse", {
+    session_id: "alice-bg2", tool_name: "Bash", tool_use_id: `toolu_${k}`, tool_response: { backgroundTaskId: `task_${k}` },
+    tool_input: { command: `./job-${k}.sh`, run_in_background: true },
+  })));
+  const [runX, runY] = [x, y].map((r) => Number(/now run #(\d+)/.exec(r.context)?.[1]));
+  const bg = join(root, "alice", ".home", "sessions", "alice-bg2.bg");
+  assert.deepEqual(readdirSync(bg).sort(), ["task_x.json", "task_y.json", "toolu_x.json", "toolu_y.json"]);
+  writeFileSync(output("task_x"), `${"noise ".repeat(2_000_000)}\nlast line of a big log\n\n[exited with code 0]\n`);
+  assert.match(notify("task_x", "toolu_x", "completed", "completed (exit code 0)").context, new RegExp(`Run #${runX} ended`));
+  assert.equal((await core.getRun(ctx, runX)).progress, "last line of a big log");
+  assert.match(notify("task_y", "toolu_y", "killed", "stopped").context, new RegExp(`Run #${runY} ended \\(cancelled\\)`));
+  // A notification naming any other file closes the run but shares none of that file.
+  const secret = join(root, "alice", "secret.txt");
+  writeFileSync(secret, "API_KEY=do-not-share\n");
+  const leak = start("toolu_d", "task_d", "./leak.sh");
+  for (const file of [join(tasks, "secret.output"), join(root, "alice", "task_d.output")]) writeFileSync(file, "API_KEY=do-not-share\n");
+  symlinkSync(secret, output("task_d")); // the expected name, but a link to another file
+  // …or the expected name in a folder reached through a link.
+  const linked = join(realpathSync(root), "alice", "linked");
+  mkdirSync(join(linked, "real"), { recursive: true });
+  writeFileSync(join(linked, "real", "task_f.output"), "API_KEY=do-not-share\n");
+  mkdirSync(join(linked, "alice-bg2"));
+  symlinkSync(join(linked, "real"), join(linked, "alice-bg2", "tasks"));
+  const leak3 = start("toolu_f", "task_f", "./leak3.sh");
+  assert.match(notify("task_f", "toolu_f", "completed", "completed (exit code 0)", join(linked, "alice-bg2", "tasks", "task_f.output")).context,
+    new RegExp(`Run #${leak3} ended`));
+  assert.match(notify("task_d", "toolu_d", "completed", "completed (exit code 0)").context, new RegExp(`Run #${leak} ended`));
+  const leak2 = start("toolu_e", "task_e", "./leak2.sh");
+  assert.match(notify("task_e", "toolu_e", "completed", "completed (exit code 0)", secret).context, new RegExp(`Run #${leak2} ended`));
+  for (const n of [leak, leak2, leak3]) {
+    const leaked = await core.getRun(ctx, n);
+    assert.equal(leaked.progress, null);
+    assert.equal(leaked.log_tail, null);
+  }
+  // Every closed run's entries are gone; the one Claude reported itself (c) too.
+  assert.deepEqual(readdirSync(bg), []);
+  hook("alice", "Stop", { session_id: "alice-bg2", last_assistant_message: "Started them." });
 });
 
 await step("a handoff comes first in the teammate's next message, and they can take it over", async () => {
