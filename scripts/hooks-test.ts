@@ -3,7 +3,7 @@
 // Run: npm run build && npm run test:hooks (with `npm run db:start` up).
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CLI, cliRunner } from "./lib/cli.ts";
@@ -44,7 +44,9 @@ function hookAsync(who: string, event: string, input: Record<string, unknown>): 
     let out = "";
     p.stdout.on("data", (d) => { out += d; });
     p.on("error", reject);
-    p.on("close", () => resolve({ context: out ? JSON.parse(out).hookSpecificOutput?.additionalContext ?? "" : "" }));
+    p.on("close", () => {
+      try { resolve({ context: out ? JSON.parse(out).hookSpecificOutput?.additionalContext ?? "" : "" }); } catch (err) { reject(err); }
+    });
     p.stdin.end(JSON.stringify({ hook_event_name: event, cwd: join(root, who), ...input }));
   });
 }
@@ -270,12 +272,16 @@ await step("a background command Claude starts becomes a run the team sees", () 
 });
 
 await step("a background command's run closes itself when Claude Code says the command ended", async () => {
-  const out = join(root, "alice", "bg-task.output");
-  writeFileSync(out, "warming up\nrps 500 ok\np99 41ms\n\n[exited with code 3]\n");
-  const notify = (taskId: string, toolUseId: string, status: string, summary: string) => hook("alice", "UserPromptSubmit", {
-    session_id: "alice-bg2", prompt: `<task-notification>\n<task-id>${taskId}</task-id>\n<tool-use-id>${toolUseId}</tool-use-id>\n` +
-      `<output-file>${out}</output-file>\n<status>${status}</status>\n<summary>${summary}</summary>\n</task-notification>`,
-  });
+  // Claude Code writes a background task's output to <tasks folder>/<task id>.output.
+  const tasks = join(root, "alice", "tasks");
+  mkdirSync(tasks, { recursive: true });
+  const output = (taskId: string) => join(tasks, `${taskId}.output`);
+  writeFileSync(output("task_a"), "warming up\nrps 500 ok\np99 41ms\n\n[exited with code 3]\n");
+  const notify = (taskId: string, toolUseId: string, status: string, summary: string, file = output(taskId)) =>
+    hook("alice", "UserPromptSubmit", {
+      session_id: "alice-bg2", prompt: `<task-notification>\n<task-id>${taskId}</task-id>\n<tool-use-id>${toolUseId}</tool-use-id>\n` +
+        `<output-file>${file}</output-file>\n<status>${status}</status>\n<summary>${summary}</summary>\n</task-notification>`,
+    });
   hook("alice", "UserPromptSubmit", { session_id: "alice-bg2", prompt: "Run the soak test" });
   const start = (toolUseId: string, taskId: string, command: string) => {
     const r = hook("alice", "PostToolUse", { session_id: "alice-bg2", tool_name: "Bash", tool_use_id: toolUseId,
@@ -286,7 +292,7 @@ await step("a background command's run closes itself when Claude Code says the c
   const failing = start("toolu_a", "task_a", "./soak.sh");
   const ok = start("toolu_b", "task_b", "./bench.sh");
   // Matched by the tool call's id; the exit code comes from the summary, the progress from the output.
-  const r = notify("other", "toolu_a", "failed", 'Background command "./soak.sh" failed with exit code 3');
+  const r = notify("other", "toolu_a", "failed", 'Background command "./soak.sh" failed with exit code 3', output("task_a"));
   assert.match(r.context, new RegExp(`Run #${failing} ended \\(failed, exit 3\\)`));
   assert.match(r.context, new RegExp(`run #${failing} · you · "./soak.sh" on \\S+ · FAILED \\(exit 3\\) just now · last: "p99 41ms"`));
   // Matched by the task's id alone too.
@@ -311,10 +317,19 @@ await step("a background command's run closes itself when Claude Code says the c
   const [runX, runY] = [x, y].map((r) => Number(/now run #(\d+)/.exec(r.context)?.[1]));
   const bg = join(root, "alice", ".home", "sessions", "alice-bg2.bg");
   assert.deepEqual(readdirSync(bg).sort(), ["task_x.json", "task_y.json", "toolu_x.json", "toolu_y.json"]);
-  writeFileSync(out, `${"noise ".repeat(2_000_000)}\nlast line of a big log\n\n[exited with code 0]\n`);
+  writeFileSync(output("task_x"), `${"noise ".repeat(2_000_000)}\nlast line of a big log\n\n[exited with code 0]\n`);
   assert.match(notify("task_x", "toolu_x", "completed", "completed (exit code 0)").context, new RegExp(`Run #${runX} ended`));
   assert.equal((await core.getRun(ctx, runX)).progress, "last line of a big log");
   assert.match(notify("task_y", "toolu_y", "killed", "stopped").context, new RegExp(`Run #${runY} ended \\(cancelled\\)`));
+  // A notification naming any other file closes the run but shares none of that file.
+  const secret = join(root, "alice", "secret.txt");
+  writeFileSync(secret, "API_KEY=do-not-share\n");
+  const leak = start("toolu_d", "task_d", "./leak.sh");
+  for (const file of [secret, join(tasks, "secret.output"), join(root, "alice", "task_d.output")]) writeFileSync(file, "API_KEY=do-not-share\n");
+  assert.match(notify("task_d", "toolu_d", "completed", "completed (exit code 0)", secret).context, new RegExp(`Run #${leak} ended`));
+  const leaked = await core.getRun(ctx, leak);
+  assert.equal(leaked.progress, null);
+  assert.equal(leaked.log_tail, null);
   // Every closed run's entries are gone; the one Claude reported itself (c) too.
   assert.deepEqual(readdirSync(bg), []);
   hook("alice", "Stop", { session_id: "alice-bg2", last_assistant_message: "Started them." });

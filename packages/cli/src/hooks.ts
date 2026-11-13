@@ -177,7 +177,7 @@ async function userPromptSubmit(input: HookInput) {
   const isPrivate = /^\s*!private\b/i.test(prompt);
   writeState(input.session_id, { ...state, private: isPrivate });
   // A background command ended: close its run here, so it never depends on Claude remembering to.
-  const closed = await closeBackgroundRuns(ctx, input.session_id, prompt).catch((err) => {
+  const closed = await closeBackgroundRuns(ctx, input.session_id, prompt, isPrivate).catch((err) => {
     appendFileSync(join(home, "hooks.log"), `${new Date().toISOString()} close-run: ${err instanceof Error ? err.message : err}\n`);
     return "";
   });
@@ -211,9 +211,18 @@ export function parseTaskNotifications(prompt: string) {
   });
 }
 
+// The output file Claude Code wrote for one of this run's background tasks: <tasks folder>/<task id>.output.
+// Anything else named in a notification is not read: a prompt can claim any path, and the tail is shared.
+export function trustedOutputFile(path: string | undefined, run: { keys: string[] }): string | undefined {
+  if (!path || !isAbsolute(path) || basename(dirname(path)) !== "tasks") return undefined;
+  const m = /^(.+)\.output$/.exec(basename(path));
+  return m && run.keys.includes(m[1]) ? path : undefined;
+}
+
 // Close the runs of this session's background commands that the prompt's notifications say ended.
-// A run Claude already reported is left as it is.
-async function closeBackgroundRuns(ctx: core.Ctx, sid: string, prompt: string): Promise<string> {
+// A run Claude already reported is left as it is (update_run ignores a second report of an end).
+// In a private turn the run is still closed, but none of its output is shared.
+async function closeBackgroundRuns(ctx: core.Ctx, sid: string, prompt: string, isPrivate: boolean): Promise<string> {
   if (!prompt.includes("<task-notification>")) return "";
   const lines: string[] = [];
   for (const n of parseTaskNotifications(prompt)) {
@@ -224,7 +233,8 @@ async function closeBackgroundRuns(ctx: core.Ctx, sid: string, prompt: string): 
       let tail = "";
       // Claude Code ends the output file with its own "[exited with code N]" line: not the job's output.
       try {
-        if (n.outputFile) tail = readTail(n.outputFile, 16_384).replace(/\s*\[exited with code -?\d+\]\s*$/, "\n").slice(-4000);
+        const file = isPrivate ? undefined : trustedOutputFile(n.outputFile, run);
+        if (file) tail = readTail(file, 16_384).replace(/\s*\[exited with code -?\d+\]\s*$/, "\n").slice(-4000);
       } catch { /* output already gone */ }
       await core.updateRun(ctx, run.id, {
         status: n.status, exitCode: n.exitCode, logTail: tail || undefined, progress: lastLine(tail) || undefined,
