@@ -119,9 +119,14 @@ export async function watch(opts: { workspace?: string; notify?: boolean }) {
         console.log(line);
         if (notify) spawnSync("notify-send", ["contexter", line.replace(/^• /, "")]);
       })
+    // SUBSCRIBED only means the channel joined; database changes start flowing seconds later, when
+    // Realtime confirms the Postgres subscription. Announce then, so nothing posted after this line is missed.
+    .on("system", {}, (msg: { extension?: string; status?: string; message?: string }) => {
+      if (msg.extension !== "postgres_changes") return;
+      if (msg.status === "ok") console.log(`Watching ${ctx.ws.slug}… (Ctrl-C to stop)`);
+      else console.error(`realtime subscription failed: ${msg.message ?? msg.status}`);
+    })
     .subscribe((status: string) => {
-      // Announce only once the subscription is live, so nothing posted after this line is missed.
-      if (status === "SUBSCRIBED") console.log(`Watching ${ctx.ws.slug}… (Ctrl-C to stop)`);
       if (status === "CHANNEL_ERROR") console.error("realtime connection failed");
     });
   await new Promise(() => {}); // run until interrupted
