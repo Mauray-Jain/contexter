@@ -255,6 +255,43 @@ await step("a background command Claude starts becomes a run the team sees", () 
   hook("alice", "Stop", { session_id: "alice-bg", last_assistant_message: "Started it." });
 });
 
+await step("a background command's run closes itself when Claude Code says the command ended", async () => {
+  const out = join(root, "alice", "bg-task.output");
+  writeFileSync(out, "warming up\nrps 500 ok\np99 41ms\n\n[exited with code 3]\n");
+  const notify = (taskId: string, toolUseId: string, status: string, summary: string) => hook("alice", "UserPromptSubmit", {
+    session_id: "alice-bg2", prompt: `<task-notification>\n<task-id>${taskId}</task-id>\n<tool-use-id>${toolUseId}</tool-use-id>\n` +
+      `<output-file>${out}</output-file>\n<status>${status}</status>\n<summary>${summary}</summary>\n</task-notification>`,
+  });
+  hook("alice", "UserPromptSubmit", { session_id: "alice-bg2", prompt: "Run the soak test" });
+  const start = (toolUseId: string, taskId: string, command: string) => {
+    const r = hook("alice", "PostToolUse", { session_id: "alice-bg2", tool_name: "Bash", tool_use_id: toolUseId,
+      tool_input: { command, description: command, run_in_background: true }, tool_response: { backgroundTaskId: taskId } });
+    assert.match(r.context, /Its end is reported automatically/);
+    return Number(/now run #(\d+)/.exec(r.context)?.[1]);
+  };
+  const failing = start("toolu_a", "task_a", "./soak.sh");
+  const ok = start("toolu_b", "task_b", "./bench.sh");
+  // Matched by the tool call's id; the exit code comes from the summary, the progress from the output.
+  const r = notify("other", "toolu_a", "failed", 'Background command "./soak.sh" failed with exit code 3');
+  assert.match(r.context, new RegExp(`Run #${failing} ended \\(failed, exit 3\\)`));
+  assert.match(r.context, new RegExp(`run #${failing} · you · "./soak.sh" on \\S+ · FAILED \\(exit 3\\) just now · last: "p99 41ms"`));
+  // Matched by the task's id alone too.
+  assert.match(notify("task_b", "toolu_other", "completed", "completed (exit code 0)").context,
+    new RegExp(`Run #${ok} ended \\(succeeded, exit 0\\)`));
+  // A second notification for a run that's already closed changes nothing.
+  assert.doesNotMatch(notify("task_b", "toolu_b", "failed", "failed with exit code 9").context, /ended \(/);
+  // A run Claude already reported is left alone.
+  const reported = start("toolu_c", "task_c", "./load.sh");
+  const a = await signIn(`alice-${run}@hooks.local`);
+  const ctx = await core.loadCtx(a.sb, a.userId, { workspace: slug, session: null });
+  await core.updateRun(ctx, (await core.getRun(ctx, reported)).id, { status: "cancelled", progress: "stopped by hand" });
+  assert.doesNotMatch(notify("task_c", "toolu_c", "completed", "completed (exit code 0)").context, /ended \(/);
+  const row = await core.getRun(ctx, reported);
+  assert.equal(row.status, "cancelled");
+  assert.equal(row.progress, "stopped by hand");
+  hook("alice", "Stop", { session_id: "alice-bg2", last_assistant_message: "Started them." });
+});
+
 await step("a handoff comes first in the teammate's next message, and they can take it over", async () => {
   const a = await signIn(`alice-${run}@hooks.local`);
   const ctx = await core.loadCtx(a.sb, a.userId, { workspace: slug, session: null });

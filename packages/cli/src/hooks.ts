@@ -18,6 +18,7 @@ import * as core from "../../../supabase/functions/_shared/contexter.ts";
 import { getClient, requireUser } from "./client.ts";
 import { home, loadConfig } from "./config.ts";
 import { ensureModalDaemon } from "./modal.ts";
+import { lastLine } from "./run.ts";
 
 const CONTEXT_LIMIT = 9500; // Claude Code caps additionalContext at 10,000 characters
 
@@ -33,6 +34,8 @@ interface HookInput {
   reason?: string;
   tool_name?: string;
   tool_input?: Record<string, unknown>;
+  tool_use_id?: string;
+  tool_response?: unknown;
 }
 
 const stateDir = join(home, "sessions");
@@ -42,9 +45,11 @@ const statePath = (sid: string) => join(stateDir, `${sid.replace(/[^\w-]/g, "_")
 // confirmed: "<file> <handles>" conflicts the user approved an edit through, because those teammates
 // were editing the file right now (asked again when someone else starts editing it). pending: the
 // conflict asked about per file, moved to confirmed once the edit runs (a rejected edit asks again).
+// bgRuns: runs registered for this session's background commands, keyed by the tool call's id and the
+// background task's id, so the task notification Claude Code sends when one ends can close its run.
 interface SessionState {
   workspace: string; session: string; private?: boolean; warned?: string[]; confirmed?: string[];
-  pending?: Record<string, string>;
+  pending?: Record<string, string>; bgRuns?: Record<string, { id: string; number: number }>;
 }
 
 function readState(sid: string): SessionState | null {
@@ -137,6 +142,11 @@ async function userPromptSubmit(input: HookInput) {
   const prompt = input.prompt ?? "";
   const isPrivate = /^\s*!private\b/i.test(prompt);
   writeState(input.session_id, { ...state, private: isPrivate });
+  // A background command ended: close its run here, so it never depends on Claude remembering to.
+  const closed = await closeBackgroundRuns(ctx, input.session_id, prompt).catch((err) => {
+    appendFileSync(join(home, "hooks.log"), `${new Date().toISOString()} close-run: ${err instanceof Error ? err.message : err}\n`);
+    return "";
+  });
   const shared = !isPrivate && prompt.trim() ? prompt : "";
   const promptEvent = shared ? await core.postPrompt(ctx, shared) : null;
   await core.startTask(ctx, shared || null, promptEvent);
@@ -146,8 +156,59 @@ async function userPromptSubmit(input: HookInput) {
   ]);
   emit("UserPromptSubmit", [
     isPrivate ? "[contexter] This message is private: it is not shared with the team. Don't post it." : "",
-    handed, overlap, delta, now, runs, hint,
+    closed, handed, overlap, delta, now, runs, hint,
   ].filter(Boolean).join("\n\n"));
+}
+
+const NOTIFICATION_STATUS: Record<string, string> = {
+  completed: "succeeded", failed: "failed", killed: "cancelled", stopped: "cancelled", cancelled: "cancelled",
+};
+
+// The background-task notifications in a prompt Claude Code sends when background commands end.
+export function parseTaskNotifications(prompt: string) {
+  const tag = (block: string, name: string) => new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(block)?.[1].trim();
+  return [...prompt.matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/g)].map(([, block]) => {
+    const summary = tag(block, "summary") ?? "";
+    const code = /exit code (-?\d+)/i.exec(summary)?.[1];
+    return {
+      taskId: tag(block, "task-id"), toolUseId: tag(block, "tool-use-id"), outputFile: tag(block, "output-file"),
+      status: NOTIFICATION_STATUS[(tag(block, "status") ?? "").toLowerCase()], exitCode: code == null ? undefined : Number(code),
+    };
+  });
+}
+
+// Close the runs of this session's background commands that the prompt's notifications say ended.
+// A run Claude already reported is left as it is.
+async function closeBackgroundRuns(ctx: core.Ctx, sid: string, prompt: string): Promise<string> {
+  if (!prompt.includes("<task-notification>")) return "";
+  const state = readState(sid);
+  const bgRuns = state?.bgRuns ?? {};
+  const lines: string[] = [];
+  for (const n of parseTaskNotifications(prompt)) {
+    const run = (n.toolUseId && bgRuns[n.toolUseId]) || (n.taskId && bgRuns[n.taskId]);
+    if (!run || !n.status) continue;
+    const row = unwrapRow<{ status: string }>(await ctx.db.from("runs").select("status").eq("id", run.id).maybeSingle());
+    if (row?.status === "running") {
+      let tail = "";
+      // Claude Code ends the output file with its own "[exited with code N]" line: not the job's output.
+      try {
+        if (n.outputFile) tail = readFileSync(n.outputFile, "utf8").replace(/\s*\[exited with code -?\d+\]\s*$/, "\n").slice(-4000);
+      } catch { /* output already gone */ }
+      await core.updateRun(ctx, run.id, {
+        status: n.status, exitCode: n.exitCode, logTail: tail || undefined, progress: lastLine(tail) || undefined,
+      });
+      lines.push(`[contexter] Run #${run.number} ended (${n.status}${n.exitCode != null ? `, exit ${n.exitCode}` : ""}) ` +
+        "and is reported to the team; no need to call update_run for it.");
+    }
+    for (const [k, v] of Object.entries(bgRuns)) if (v.id === run.id) delete bgRuns[k];
+  }
+  if (state) writeState(sid, { ...readState(sid)!, bgRuns });
+  return lines.join("\n");
+}
+
+function unwrapRow<T>(res: { data: T | null; error: { message: string } | null }): T | null {
+  if (res.error) throw new Error(res.error.message);
+  return res.data;
 }
 
 // Final assistant text and touched files of the last turn, from the transcript (JSONL).
@@ -270,10 +331,20 @@ async function backgroundCommand(input: HookInput) {
     title: typeof description === "string" && description.trim() ? description : core.truncate(command, 120),
     host: hostname(), command,
   });
-  emit("PostToolUse",
-    `[contexter] This background command is now run #${run.number}, so teammates can see it. When you learn how it ` +
-    `went (its output, or the user tells you), call contexter's update_run with run=${run.number}: status succeeded, ` +
-    "failed or cancelled, exit_code, and a one-line progress. Update progress along the way if it's long.");
+  // Remember it, so the notification Claude Code sends when the command ends closes the run.
+  const response = input.tool_response as { backgroundTaskId?: unknown } | undefined;
+  const keys = [input.tool_use_id, response?.backgroundTaskId].filter((k): k is string => typeof k === "string" && !!k);
+  if (keys.length) {
+    const bgRuns = { ...c.state.bgRuns };
+    for (const k of keys) bgRuns[k] = { id: run.id, number: run.number };
+    writeState(input.session_id, { ...c.state, bgRuns: Object.fromEntries(Object.entries(bgRuns).slice(-100)) });
+  }
+  emit("PostToolUse", keys.length
+    ? `[contexter] This background command is now run #${run.number}, so teammates can see it. Its end is reported ` +
+      `automatically; if it's long, you can post progress along the way with contexter's update_run (run=${run.number}).`
+    : `[contexter] This background command is now run #${run.number}, so teammates can see it. When you learn how it ` +
+      `went (its output, or the user tells you), call contexter's update_run with run=${run.number}: status succeeded, ` +
+      "failed or cancelled, exit_code, and a one-line progress. Update progress along the way if it's long.");
 }
 
 async function sessionEnd(input: HookInput) {
