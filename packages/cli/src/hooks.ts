@@ -95,8 +95,8 @@ export function readTail(path: string, bytes: number): string {
     if (!stat.isFile() || stat.ino !== before.ino || stat.dev !== before.dev) throw new Error(`${path} changed while opening`);
     const size = stat.size;
     const buf = Buffer.alloc(Math.min(size, bytes));
-    readSync(fd, buf, 0, buf.length, size - buf.length);
-    return buf.toString("utf8");
+    const read = readSync(fd, buf, 0, buf.length, size - buf.length);
+    return buf.subarray(0, read).toString("utf8");
   } finally {
     closeSync(fd);
   }

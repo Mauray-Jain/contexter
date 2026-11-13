@@ -1,7 +1,8 @@
--- update_run: once a run has ended, a later report of an end changes nothing. Before, it kept the
--- first status but overwrote progress, log tail and exit code, so two reporters of the same end
--- (the contexter hook closing a background command's run, and Claude calling update_run) could mix
--- their details. Same signature, so grants and callers are unchanged.
+-- update_run: once a run has ended, later reports change nothing. Before, it kept the first status
+-- but overwrote progress, log tail and exit code, so two reporters of the same end (the contexter
+-- hook closing a background command's run, and Claude calling update_run), or a heartbeat that
+-- arrived late, could mix their details into the final record. Same signature, so grants and
+-- callers are unchanged.
 create or replace function public.update_run(
   p_run uuid, p_status text default null, p_progress text default null,
   p_log_tail text default null, p_exit_code int default null
@@ -18,8 +19,8 @@ begin
   if not found or not (select private.can_write(r.workspace_id)) then
     raise exception 'run not found or not writable' using errcode = 'P0002';
   end if;
-  -- The first report of an end wins, whole.
-  if r.status <> 'running' and coalesce(p_status, 'running') <> 'running' then
+  -- The first report of an end wins, whole: nothing after it changes the run.
+  if r.status <> 'running' then
     return r;
   end if;
   ended := r.status = 'running' and coalesce(p_status, 'running') <> 'running';

@@ -1,7 +1,7 @@
 -- Access model + concurrency tests for the core schema. Run: npx supabase test db
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(84);
+select plan(85);
 
 -- Three people: alice (owner), bob (editor via invite), carol (viewer via invite), eve (outsider).
 insert into auth.users (id, email) values
@@ -275,6 +275,9 @@ select is((select status || ' ' || exit_code from public.runs where id = (select
   'a finished run keeps its first final status');
 select is((select progress from public.runs where id = (select id from run1)), 'Killed',
   'a later report of an end changes nothing, details included');
+select public.update_run((select id from run1), null, 'late heartbeat', 'late tail');
+select is((select progress || ' ' || log_tail from public.runs where id = (select id from run1)), 'Killed line 1\nstep 10/100',
+  'a heartbeat after the end changes nothing');
 select is((select mentions from public.events where kind = 'run' and payload->>'action' = 'finished'),
   array['alice'], 'the end of a run mentions its watchers');
 select public.watch_run((select id from run1), array['carol']);
