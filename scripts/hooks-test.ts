@@ -2,8 +2,8 @@
 // the installed hook commands exactly as Claude Code does (stdin JSON, stdout JSON).
 // Run: npm run build && npm run test:hooks (with `npm run db:start` up).
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { chmodSync, copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CLI, cliRunner } from "./lib/cli.ts";
@@ -33,6 +33,20 @@ function hook(who: string, event: string, input: Record<string, unknown>) {
   });
   const output = r.stdout ? JSON.parse(r.stdout).hookSpecificOutput ?? {} : {};
   return { status: r.status, context: output.additionalContext ?? "", output, ms: Date.now() - started, stderr: r.stderr };
+}
+
+// The same, without waiting: to run several hooks at once, as Claude Code can.
+function hookAsync(who: string, event: string, input: Record<string, unknown>): Promise<{ context: string }> {
+  return new Promise((resolve, reject) => {
+    const p = spawn("sh", ["-c", installedHooks(who)[event]], {
+      cwd: join(root, who), env: { ...process.env, CONTEXTER_HOME: join(root, who, ".home") },
+    });
+    let out = "";
+    p.stdout.on("data", (d) => { out += d; });
+    p.on("error", reject);
+    p.on("close", () => resolve({ context: out ? JSON.parse(out).hookSpecificOutput?.additionalContext ?? "" : "" }));
+    p.stdin.end(JSON.stringify({ hook_event_name: event, cwd: join(root, who), ...input }));
+  });
 }
 
 function transcript(who: string, turns: { user: string; assistant: string; wrote?: string }[]) {
@@ -289,6 +303,20 @@ await step("a background command's run closes itself when Claude Code says the c
   const row = await core.getRun(ctx, reported);
   assert.equal(row.status, "cancelled");
   assert.equal(row.progress, "stopped by hand");
+  // Two background commands registered at the same moment both close; a huge output is read from its end.
+  const [x, y] = await Promise.all(["x", "y"].map((k) => hookAsync("alice", "PostToolUse", {
+    session_id: "alice-bg2", tool_name: "Bash", tool_use_id: `toolu_${k}`, tool_response: { backgroundTaskId: `task_${k}` },
+    tool_input: { command: `./job-${k}.sh`, run_in_background: true },
+  })));
+  const [runX, runY] = [x, y].map((r) => Number(/now run #(\d+)/.exec(r.context)?.[1]));
+  const bg = join(root, "alice", ".home", "sessions", "alice-bg2.bg");
+  assert.deepEqual(readdirSync(bg).sort(), ["task_x.json", "task_y.json", "toolu_x.json", "toolu_y.json"]);
+  writeFileSync(out, `${"noise ".repeat(2_000_000)}\nlast line of a big log\n\n[exited with code 0]\n`);
+  assert.match(notify("task_x", "toolu_x", "completed", "completed (exit code 0)").context, new RegExp(`Run #${runX} ended`));
+  assert.equal((await core.getRun(ctx, runX)).progress, "last line of a big log");
+  assert.match(notify("task_y", "toolu_y", "killed", "stopped").context, new RegExp(`Run #${runY} ended \\(cancelled\\)`));
+  // Every closed run's entries are gone; the one Claude reported itself (c) too.
+  assert.deepEqual(readdirSync(bg), []);
   hook("alice", "Stop", { session_id: "alice-bg2", last_assistant_message: "Started them." });
 });
 

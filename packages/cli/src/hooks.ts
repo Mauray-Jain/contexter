@@ -11,7 +11,9 @@
 //   SessionEnd        → close the session, release its locks
 // Hooks must never get in the way: every failure is logged and the hook exits 0
 // (exit 2 on UserPromptSubmit would block the user's prompt).
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, rmSync, writeFileSync,
+} from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import * as core from "../../../supabase/functions/_shared/contexter.ts";
@@ -45,11 +47,9 @@ const statePath = (sid: string) => join(stateDir, `${sid.replace(/[^\w-]/g, "_")
 // confirmed: "<file> <handles>" conflicts the user approved an edit through, because those teammates
 // were editing the file right now (asked again when someone else starts editing it). pending: the
 // conflict asked about per file, moved to confirmed once the edit runs (a rejected edit asks again).
-// bgRuns: runs registered for this session's background commands, keyed by the tool call's id and the
-// background task's id, so the task notification Claude Code sends when one ends can close its run.
 interface SessionState {
   workspace: string; session: string; private?: boolean; warned?: string[]; confirmed?: string[];
-  pending?: Record<string, string>; bgRuns?: Record<string, { id: string; number: number }>;
+  pending?: Record<string, string>;
 }
 
 function readState(sid: string): SessionState | null {
@@ -58,6 +58,40 @@ function readState(sid: string): SessionState | null {
 function writeState(sid: string, s: SessionState) {
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   writeFileSync(statePath(sid), JSON.stringify(s), { mode: 0o600 });
+}
+
+// The runs of a session's background commands, one small file per key (the tool call's id and the
+// background task's id), so the notification Claude Code sends when a command ends can close its run.
+// One file per key: hooks of the same session can run at once, and none rewrites another's entry.
+interface BgRun { id: string; number: number; keys: string[] }
+const bgDir = (sid: string) => join(stateDir, `${sid.replace(/[^\w-]/g, "_")}.bg`);
+const bgPath = (sid: string, key: string) => join(bgDir(sid), `${key.replace(/[^\w-]/g, "_")}.json`);
+function rememberBgRun(sid: string, run: BgRun) {
+  mkdirSync(bgDir(sid), { recursive: true, mode: 0o700 });
+  for (const k of run.keys) writeFileSync(bgPath(sid, k), JSON.stringify(run), { mode: 0o600 });
+}
+function findBgRun(sid: string, keys: (string | undefined)[]): BgRun | undefined {
+  for (const k of keys) {
+    if (!k) continue;
+    try { return JSON.parse(readFileSync(bgPath(sid, k), "utf8")); } catch { /* not this key */ }
+  }
+  return undefined;
+}
+function forgetBgRun(sid: string, run: BgRun) {
+  for (const k of run.keys) rmSync(bgPath(sid, k), { force: true });
+}
+
+// The end of a file, without reading all of it: background jobs can write gigabytes of output.
+export function readTail(path: string, bytes: number): string {
+  const fd = openSync(path, "r");
+  try {
+    const size = fstatSync(fd).size;
+    const buf = Buffer.alloc(Math.min(size, bytes));
+    readSync(fd, buf, 0, buf.length, size - buf.length);
+    return buf.toString("utf8");
+  } finally {
+    closeSync(fd);
+  }
 }
 
 // The folder holding .contexter.json: the project root every member's paths are relative to.
@@ -181,18 +215,16 @@ export function parseTaskNotifications(prompt: string) {
 // A run Claude already reported is left as it is.
 async function closeBackgroundRuns(ctx: core.Ctx, sid: string, prompt: string): Promise<string> {
   if (!prompt.includes("<task-notification>")) return "";
-  const state = readState(sid);
-  const bgRuns = state?.bgRuns ?? {};
   const lines: string[] = [];
   for (const n of parseTaskNotifications(prompt)) {
-    const run = (n.toolUseId && bgRuns[n.toolUseId]) || (n.taskId && bgRuns[n.taskId]);
+    const run = findBgRun(sid, [n.toolUseId, n.taskId]);
     if (!run || !n.status) continue;
     const row = unwrapRow<{ status: string }>(await ctx.db.from("runs").select("status").eq("id", run.id).maybeSingle());
     if (row?.status === "running") {
       let tail = "";
       // Claude Code ends the output file with its own "[exited with code N]" line: not the job's output.
       try {
-        if (n.outputFile) tail = readFileSync(n.outputFile, "utf8").replace(/\s*\[exited with code -?\d+\]\s*$/, "\n").slice(-4000);
+        if (n.outputFile) tail = readTail(n.outputFile, 16_384).replace(/\s*\[exited with code -?\d+\]\s*$/, "\n").slice(-4000);
       } catch { /* output already gone */ }
       await core.updateRun(ctx, run.id, {
         status: n.status, exitCode: n.exitCode, logTail: tail || undefined, progress: lastLine(tail) || undefined,
@@ -200,9 +232,8 @@ async function closeBackgroundRuns(ctx: core.Ctx, sid: string, prompt: string): 
       lines.push(`[contexter] Run #${run.number} ended (${n.status}${n.exitCode != null ? `, exit ${n.exitCode}` : ""}) ` +
         "and is reported to the team; no need to call update_run for it.");
     }
-    for (const [k, v] of Object.entries(bgRuns)) if (v.id === run.id) delete bgRuns[k];
+    forgetBgRun(sid, run);
   }
-  if (state) writeState(sid, { ...readState(sid)!, bgRuns });
   return lines.join("\n");
 }
 
@@ -334,11 +365,7 @@ async function backgroundCommand(input: HookInput) {
   // Remember it, so the notification Claude Code sends when the command ends closes the run.
   const response = input.tool_response as { backgroundTaskId?: unknown } | undefined;
   const keys = [input.tool_use_id, response?.backgroundTaskId].filter((k): k is string => typeof k === "string" && !!k);
-  if (keys.length) {
-    const bgRuns = { ...c.state.bgRuns };
-    for (const k of keys) bgRuns[k] = { id: run.id, number: run.number };
-    writeState(input.session_id, { ...c.state, bgRuns: Object.fromEntries(Object.entries(bgRuns).slice(-100)) });
-  }
+  if (keys.length) rememberBgRun(input.session_id, { id: run.id, number: run.number, keys });
   emit("PostToolUse", keys.length
     ? `[contexter] This background command is now run #${run.number}, so teammates can see it. Its end is reported ` +
       `automatically; if it's long, you can post progress along the way with contexter's update_run (run=${run.number}).`
@@ -354,6 +381,7 @@ async function sessionEnd(input: HookInput) {
   await requireUser(sb);
   await sb.rpc("end_session", { p_session: state.session });
   rmSync(statePath(input.session_id), { force: true });
+  rmSync(bgDir(input.session_id), { recursive: true, force: true });
 }
 
 const handlers: Record<string, (i: HookInput) => Promise<void>> = {
