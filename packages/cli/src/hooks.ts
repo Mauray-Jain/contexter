@@ -195,6 +195,10 @@ async function context(input: HookInput, opts: { create: boolean }) {
     noteAttachment(input.session_id, state.workspace, workspace);
     state = null;
   }
+  // A notice still waiting must name where the session is now, even if no session was created since.
+  if (!state && pendingMove(input.session_id) && pendingMove(input.session_id)!.to !== workspace) {
+    noteAttachment(input.session_id, undefined, workspace);
+  }
   if (!workspace) return null;
   if (!state && !opts.create) return null;
   // A session that starts outside SessionStart (the folder was linked mid-session) must be told too.
@@ -221,7 +225,6 @@ async function startModalWatcher(ctx: core.Ctx, input: HookInput) {
 async function sessionStart(input: HookInput) {
   const c = await context(input, { create: true });
   if (!c) return emit("SessionStart", takeNotice(input.session_id));
-  takeNotice(input.session_id); // its introduction below names the workspace
   const { ctx } = c;
   await startModalWatcher(ctx, input);
   // Mark the backlog as read: the memory context below already covers it.
@@ -237,6 +240,7 @@ async function sessionStart(input: HookInput) {
     `Pass workspace "${ctx.ws.slug}" to every contexter tool call in this session.`,
     handed, overview, memory, runs, hint,
   ].filter(Boolean).join("\n\n"));
+  takeNotice(input.session_id); // shown: the introduction above names the workspace
 }
 
 async function userPromptSubmit(input: HookInput) {

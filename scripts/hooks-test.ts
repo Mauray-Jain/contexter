@@ -228,6 +228,16 @@ await step("Claude is told the session's workspace whenever it changes outside S
   assert.doesNotMatch(hookIn(late, "UserPromptSubmit", { session_id: "alice-late", prompt: "Back to the cache" }), /no longer linked/);
   cliIn(late, ["unlink"]);
   hookIn(late, "Stop", { session_id: "alice-late", last_assistant_message: "ok" }); // closes the session
+  // Relinked elsewhere, then unlinked, both noticed only by Stop: the prompt hears "unlinked".
+  cliIn(late, ["link", slug]);
+  hookIn(late, "UserPromptSubmit", { session_id: "alice-late", prompt: "Cache again" });
+  cliIn(late, ["link", `${slug}-b`]);
+  hookIn(late, "Stop", { session_id: "alice-late", last_assistant_message: "ok" });
+  cliIn(late, ["unlink"]);
+  hookIn(late, "Stop", { session_id: "alice-late", last_assistant_message: "ok" });
+  const told = hookIn(late, "UserPromptSubmit", { session_id: "alice-late", prompt: "Where am I?" });
+  assert.match(told, /no longer linked/);
+  assert.doesNotMatch(told, /pass workspace/);
   // A folder attached only through CONTEXTER_WORKSPACE can be unlinked too.
   const envOnly = join(root, "env-only");
   mkdirSync(envOnly, { recursive: true });
