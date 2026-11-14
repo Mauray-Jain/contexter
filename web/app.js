@@ -231,24 +231,47 @@ export async function requireSignIn(mount, { title = `Sign in to ${PRODUCT}`, no
     const github = el("button", { type: "button", class: "primary wide", style: "margin-bottom:12px", onclick: () =>
       sb.auth.signInWithOAuth({ provider: "github", options: { redirectTo: location.href } }) }, "Continue with GitHub");
 
-    const example = [
+    const feed = [
       ["priya", "asked: “tighten the ablation paragraph in method”", "just now"],
       ["priya", "→ their Claude: rewrote it, two sentences shorter", "just now"],
       ["mehul", "edited sections/results (v4→v5)", "2m ago"],
       ["jordan", "recorded D-0003: frame the result as a trade-off", "9m ago"],
+      ["sam", "asked: “@priya can you check Table 2?”", "14m ago"],
     ];
-    mount.replaceChildren(el("div", { class: "entry" },
-      el("div", {},
-        el("div", { class: "brand", style: "padding:0" }, el("span", { class: "brand-mark" }, icon("feed")), PRODUCT),
-        el("h1", {}, "Every Claude on your team, in sync."),
-        el("p", { class: "lede" }, "One shared workspace, a live feed of what everyone asked and changed, and the reasoning behind every decision."),
-        el("section", { class: "card example", "aria-label": "Example of the live feed" },
-          el("div", { class: "card-head" }, el("h2", {}, "Team feed"), el("span", { class: "live" }, el("i"), "Live")),
-          el("ul", {}, example.map(([who, what, when], i) => el("li", { style: `--i:${i}` }, avatar(who, "sm"), el("span", {}, el("b", {}, who), " ", what), el("span", { class: "when" }, when)))),
-          el("small", {}, "Example activity"))),
-      el("section", { class: "card signin" },
-        el("h2", {}, title), note ? el("p", { class: "muted" }, note) : el("p", { class: "muted" }, "Sign in to set up your team or join one."),
-        el("div", { style: "height:8px" }), github, el("div", { class: "divider" }, "or"), emailForm, codeForm, status)));
+    // The headline's pill cycles through phrases; the form sits right under it.
+    const words = ["in sync", "on one page", "in the loop", "up to speed"];
+    // Every phrase is stacked in one grid cell, so the pill is always as wide as the longest one and never jumps.
+    const spans = words.map((w, i) => el("span", { class: i === 0 ? "on" : "" }, w));
+    const word = el("span", { class: "pill-text" }, spans);
+    let wi = 0;
+    const cycle = setInterval(() => {
+      if (!word.isConnected) return clearInterval(cycle);
+      spans[wi].classList.remove("on");
+      wi = (wi + 1) % words.length;
+      spans[wi].classList.add("on");
+    }, 2600);
+    const chip = (cls, who, what) => el("div", { class: `float-chip ${cls}`, "aria-hidden": "true" }, avatar(who, "sm"), el("span", {}, el("b", {}, who), what));
+    mount.replaceChildren(el("div", { class: "landing" },
+      el("header", { class: "land-top" },
+        el("span", { class: "brand", style: "padding:0" }, el("span", { class: "brand-mark" }, icon("feed")), PRODUCT),
+        el("button", { type: "button", class: "btn-ghost btn-sm", "aria-label": "Toggle light and dark theme", onclick: toggleTheme }, icon("moon"))),
+      el("div", { class: "land-hero" },
+        el("h1", {}, "Every Claude on your team,", el("br"), el("span", { class: "pill" }, el("i", { class: "pill-dot" }), word), "."),
+        el("p", { class: "lede" }, note || "One shared workspace, a live feed of what everyone asked and changed, and the reasoning behind every decision."),
+        el("div", { class: "auth" },
+          el("div", { class: "auth-row" }, github),
+          el("div", { class: "divider" }, "or use your email"),
+          emailForm, codeForm, status)),
+      el("div", { class: "window-wrap" },
+        chip("c1", "priya", "'s Claude is editing sections/method"),
+        chip("c2", "jordan", " joined the project"),
+        el("section", { class: "window", "aria-label": "Example of the live feed" },
+          el("div", { class: "window-bar" }, el("i"), el("i"), el("i"), el("span", {}, "Web paper · Team feed"), el("span", { class: "live" }, el("i"), "Live")),
+          el("div", { class: "window-body" },
+            el("ul", {}, feed.map(([who, what, when], i) => el("li", { style: `--i:${i}` }, avatar(who, "sm"), el("span", {}, el("b", {}, who), " ", what), el("span", { class: "when" }, when)))),
+            el("div", { class: "window-side" }, el("b", {}, "Active now"),
+              ["priya", "mehul"].map((n) => el("div", { class: "cell-person" }, el("span", { class: "avatar-live" }, avatar(n, "sm")), el("span", {}, n))),
+              el("small", {}, "Example activity")))))));
   });
 }
 

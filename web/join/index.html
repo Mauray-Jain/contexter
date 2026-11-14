@@ -134,7 +134,9 @@
 
   page(
     el("section", { class: "hero" }, el("div", { class: "avatars" }, avatar(user.email)),
-      el("h1", {}, joinedTeams.length ? `You're in. Welcome to ${joinedTeams.join(", ")}.` : "You're all set up."),
+      el("h1", {}, joinedTeams.length
+        ? ["You're in. Welcome to ", el("span", { class: "pill" }, el("i", { class: "pill-dot" }), joinedTeams.join(", ")), "."]
+        : ["You're all ", el("span", { class: "pill" }, el("i", { class: "pill-dot" }), "set up"), "."]),
       el("p", {}, joinedTeams.length
         ? `You can open ${projects.length === 1 ? projects[0].name : `${projects.length} projects`}. Four quick steps connect your Claude, and then everything your team does shows up in its context.`
         : "Four quick steps connect your Claude to your team's shared workspace.")),
