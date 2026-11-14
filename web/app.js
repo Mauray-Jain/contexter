@@ -1,7 +1,7 @@
 // Shared bits for contexter's web pages: the Supabase client and a sign-in panel.
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.118.0/+esm";
 
-const cfg = window.CONTEXTER ?? {};
+export const cfg = window.CONTEXTER ?? {};
 if (!cfg.url || !cfg.key) {
   document.body.innerHTML = '<main class="card"><h1>Not configured</h1><p>config.js is missing the Supabase URL and publishable key.</p></main>';
   throw new Error("contexter: missing config.js");
@@ -66,4 +66,26 @@ export function ago(iso) {
   if (s < 3600) return `${Math.round(s / 60)}m ago`;
   if (s < 86400) return `${Math.round(s / 3600)}h ago`;
   return `${Math.round(s / 86400)}d ago`;
+}
+
+// Call one of contexter's Edge Functions as the signed-in user.
+export async function callFunction(name, body) {
+  const { data } = await sb.auth.getSession();
+  const res = await fetch(`${cfg.url}/functions/v1/${name}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${data.session?.access_token ?? ""}`, apikey: cfg.key },
+    body: JSON.stringify(body),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json.error ?? `request failed (${res.status})`);
+  return json;
+}
+
+// A command in a box with a copy button.
+export function command(text) {
+  const btn = el("button", { type: "button", class: "copy", onclick: async () => {
+    try { await navigator.clipboard.writeText(text); btn.textContent = "Copied"; } catch { btn.textContent = "Select and copy"; }
+    setTimeout(() => (btn.textContent = "Copy"), 1500);
+  } }, "Copy");
+  return el("div", { class: "cmd" }, el("code", {}, text), btn);
 }

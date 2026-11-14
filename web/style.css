@@ -77,3 +77,30 @@ dialog::backdrop { background: rgba(0, 0, 0, .4); }
 dialog pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 14px/1.5 ui-monospace, monospace; max-height: 60vh; overflow: auto; }
 .scopes { margin: 12px 0 20px; padding-left: 20px; }
 .actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+/* team onboarding */
+a { color: var(--accent); }
+.page { max-width: 900px; margin: 0 auto; padding: 24px 16px 48px; }
+.stack-lg { display: grid; gap: 16px; }
+.cards-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+@media (max-width: 800px) { .cards-2 { grid-template-columns: 1fr; } }
+textarea { font: inherit; width: 100%; min-height: 90px; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--text); resize: vertical; }
+textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+label.field { display: grid; gap: 4px; margin-bottom: 12px; font-weight: 600; font-size: .9rem; }
+label.field > span.hint { font-weight: 400; color: var(--muted); }
+.checks { display: grid; gap: 6px; margin: 0 0 12px; padding: 0; list-style: none; }
+.checks li { display: flex; align-items: center; gap: 8px; }
+.checks li span { flex: 1; overflow-wrap: anywhere; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--border); border-radius: 999px; padding: 1px 4px 1px 10px; font-size: .85rem; }
+.chip select, .chip button { border: 0; background: transparent; padding: 2px 4px; font-size: .85rem; }
+.cmd { display: flex; align-items: center; gap: 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 6px 6px 6px 12px; margin: 6px 0 12px; }
+.cmd code { flex: 1; overflow-x: auto; white-space: nowrap; font: 13px/1.5 ui-monospace, monospace; }
+.cmd .copy { padding: 4px 10px; font-size: .85rem; }
+ol.steps { padding-left: 20px; margin: 0; }
+ol.steps > li { margin-bottom: 16px; }
+.status-ok { color: var(--ok); font-weight: 600; }
+.status-err { color: var(--danger); }
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+td .actions { justify-content: flex-start; }
+button.link { border: 0; background: none; color: var(--accent); padding: 2px 4px; }

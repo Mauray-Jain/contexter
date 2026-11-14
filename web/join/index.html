@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Join your team · contexter</title>
+  <link rel="stylesheet" href="../style.css">
+  <script src="../config.js"></script>
+</head>
+<body>
+<main id="main" class="page"><p class="muted">Loading…</p></main>
+<script type="module">
+  // Where an emailed invitation lands: sign in, apply the invitation, then walk through
+  // connecting Claude. The invitation is matched to the verified email, never to a code.
+  import { cfg, command, el, requireSignIn, sb, signOut } from "../app.js";
+
+  const main = document.getElementById("main");
+
+  // An emailed link carries its own session in the URL. It must win over whoever is already
+  // signed in on this browser, or the invitation would be checked against the wrong account.
+  const fromLink = new URLSearchParams(location.hash.slice(1));
+  if (fromLink.get("access_token") && fromLink.get("refresh_token")) {
+    const { error: linkError } = await sb.auth.setSession({
+      access_token: fromLink.get("access_token"), refresh_token: fromLink.get("refresh_token"),
+    });
+    history.replaceState(null, "", location.pathname + location.search); // keep tokens out of the address bar and history
+    if (linkError) main.replaceChildren(el("p", { class: "status-err", role: "alert" }, `This link didn't work: ${linkError.message}. Ask for a new invitation.`));
+  }
+
+  const user = await requireSignIn(main, {
+    title: "Accept your invitation",
+    note: "Sign in with the email address your invitation was sent to.",
+  });
+
+  main.replaceChildren(el("p", { class: "muted", role: "status" }, "Applying your invitations…"));
+  const { data: accepted, error } = await sb.rpc("accept_pending_invites");
+  if (error) {
+    main.replaceChildren(el("section", { class: "card narrow" }, el("h1", {}, "Something went wrong"),
+      el("p", { class: "status-err" }, error.message), el("button", { type: "button", onclick: signOut }, "Sign out")));
+    throw error;
+  }
+
+  // Every project this person can reach through a team, newest team grants first.
+  const { data: mine } = await sb.from("members").select("handle, role, workspaces(id, slug, name, team_id)").eq("user_id", user.id);
+  const projects = (mine ?? []).filter((m) => m.workspaces).map((m) => ({ ...m.workspaces, handle: m.handle, role: m.role }));
+  const justJoined = new Set((accepted ?? []).flatMap((a) => a.workspaces));
+
+  const header = el("header", { class: "bar" }, el("h1", {}, "Welcome to contexter"), el("span", { class: "spacer" }),
+    el("span", { class: "muted" }, user.email), el("button", { type: "button", onclick: signOut }, "Sign out"));
+
+  // Joined a team but not given a project yet (a team-only invitation): that is success, not an error.
+  const { data: inTeams } = await sb.from("team_members").select("teams(name)").eq("user_id", user.id);
+  if (!projects.length && (accepted ?? []).length + (inTeams ?? []).length) {
+    const names = [...new Set([...(accepted ?? []).map((a) => a.team), ...(inTeams ?? []).map((t) => t.teams?.name).filter(Boolean)])];
+    main.replaceChildren(header, el("section", { class: "card" }, el("h2", {}, "You're in"),
+      el("p", {}, "You joined ", el("strong", {}, names.join(", ")), "."),
+      el("p", {}, "You haven't been given access to a project yet. A team admin can add you from the team page, and this page will then show how to connect your Claude."),
+      el("p", {}, el("a", { href: "../team/" }, "Open the team page"))));
+    throw new Error("no projects yet");
+  }
+
+  if (!projects.length) {
+    main.replaceChildren(header, el("section", { class: "card" },
+      el("h2", {}, "No invitations found"),
+      el("p", {}, `There is no pending invitation for ${user.email}. Ask a team admin to invite this exact address, or sign out and use the address they invited.`),
+      el("p", { class: "muted" }, "Have an invite code instead? Run ", el("code", {}, "contexter join <code> --handle <name>"), ".")));
+    throw new Error("no projects");
+  }
+
+  const banner = (accepted ?? []).length
+    ? el("section", { class: "card" }, el("h2", {}, "You're in"),
+        ...accepted.map((a) => el("p", {}, "You joined ", el("strong", {}, a.team),
+          a.workspaces.length ? ` with access to ${a.workspaces.join(", ")}.` : ".")))
+    : el("section", { class: "card" }, el("h2", {}, "You're already set up"),
+        el("p", {}, "No new invitations were waiting. Your projects are below."));
+
+  // Which project to connect first: one just granted, else the first.
+  let chosen = projects.find((p) => justJoined.has(p.slug)) ?? projects[0];
+  const stepsHost = el("div");
+  const picker = projects.length > 1
+    ? el("label", { class: "field" }, "Project to connect",
+        el("select", { onchange: (e) => { chosen = projects.find((p) => p.slug === e.target.value); renderSteps(); } },
+          projects.map((p) => el("option", { value: p.slug, selected: p.slug === chosen.slug }, p.name))))
+    : null;
+
+  let poll;
+  function renderSteps() {
+    clearInterval(poll);
+    const live = el("p", { class: "muted", role: "status", "aria-live": "polite" }, "Waiting for your first Claude session in this project…");
+    stepsHost.replaceChildren(el("ol", { class: "steps" },
+      el("li", {}, el("strong", {}, "Install the contexter command"),
+        command("git clone https://github.com/Mauray-Jain/contexter && cd contexter && npm install && npm run build"),
+        command(`node packages/cli/dist/contexter.mjs setup --url ${cfg.url} --key ${cfg.key}`),
+        el("p", { class: "muted" }, "Then alias it so the rest reads as ", el("code", {}, "contexter"), ": ",
+          el("code", {}, 'alias contexter="node $PWD/packages/cli/dist/contexter.mjs"'))),
+      el("li", {}, el("strong", {}, "Sign in on this machine"), command("contexter login")),
+      el("li", {}, el("strong", {}, `Connect Claude Code to ${chosen.name}`),
+        el("p", { class: "muted" }, "Run this from your project folder:"),
+        command(`contexter install code --workspace ${chosen.slug}`)),
+      el("li", {}, el("strong", {}, "Or connect Claude chat (web, desktop, mobile)"),
+        el("p", { class: "muted" }, "Add this as a custom connector in Claude settings, sign in, then upload the skill:"),
+        command(`${cfg.url}/functions/v1/mcp`), command("contexter install chat")),
+      el("li", {}, el("strong", {}, "Say hello"), el("p", {}, "Open Claude and send any message. This page notices when your first session reaches the team."), live)));
+
+    const since = new Date().toISOString();
+    poll = setInterval(async () => {
+      const { data } = await sb.from("sessions").select("id").eq("workspace_id", chosen.id).eq("user_id", user.id).gt("started_at", since).limit(1);
+      if (data?.length) {
+        clearInterval(poll);
+        live.className = "status-ok";
+        live.textContent = "Connected. Your Claude is now in the team's shared workspace.";
+      }
+    }, 4000);
+  }
+  renderSteps();
+
+  main.replaceChildren(header, el("div", { class: "stack-lg" }, banner,
+    el("section", { class: "card" }, el("h2", {}, "Connect your Claude"), picker, stepsHost),
+    el("p", { class: "muted" }, el("a", { href: `../?w=${chosen.slug}` }, "Open the live team dashboard"), " · ",
+      el("a", { href: "../team/" }, "Manage teams"))));
+</script>
+</body>
+</html>

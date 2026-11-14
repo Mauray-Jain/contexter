@@ -174,5 +174,20 @@ select throws_ok($$ select public.grant_project_access((select legacy from ids),
   'but nobody else can');
 reset role;
 
+-- ── the dashboard overview: admins only
+select pg_temp.act_as('00000000-0000-0000-0000-0000000001a1');
+select is(jsonb_array_length(public.team_overview((select team from ids)) -> 'projects'), 2, 'overview lists the team''s two projects');
+select ok((select bool_or(r ->> 'email' = 'admin@edge.local') from jsonb_array_elements(public.team_overview((select team from ids)) -> 'roster') r),
+  'overview shows member emails to admins');
+select is((select jsonb_array_length(r -> 'projects') from jsonb_array_elements(public.team_overview((select team from ids)) -> 'roster') r
+           where r ->> 'email' = 'sam@two.local'), 2, 'and each person''s project access');
+reset role;
+select pg_temp.act_as('00000000-0000-0000-0000-0000000001a5');
+select throws_ok($$ select public.team_overview((select team from ids)) $$, '42501', null, 'a plain member cannot see the roster');
+reset role;
+select pg_temp.act_as('00000000-0000-0000-0000-0000000001a4');
+select throws_ok($$ select public.team_overview((select team from ids)) $$, '42501', null, 'and neither can another team''s admin');
+reset role;
+
 select * from finish();
 rollback;

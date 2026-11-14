@@ -48,7 +48,7 @@
   } }, memberships.map((m) => el("option", { value: m.workspaces.slug, selected: m.workspaces.id === ws.id }, m.workspaces.name)));
 
   main.replaceChildren(
-    el("header", { class: "bar" }, el("h1", {}, "contexter"), select, el("span", { class: "spacer" }),
+    el("header", { class: "bar" }, el("h1", {}, "contexter"), select, el("span", { class: "spacer" }), el("a", { href: "team/" }, "Teams"),
       el("span", { class: "muted" }, user.email), el("button", { type: "button", onclick: signOut }, "Sign out")),
     el("div", { class: "grid" },
       el("section", { class: "card" }, el("h2", {}, "Team feed"), feedList),

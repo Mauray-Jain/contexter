@@ -55,10 +55,15 @@ program.command("init")
   .option("--name <name>", "display name (defaults to slug)")
   .addOption(new Option("--template <template>", "starting structure")
     .choices(Object.keys(templates)).default("blank"))
-  .action(async (slug, { handle, name, template }) => {
+  .option("--team <slug>", "put the project in one of your teams (you must administer it)")
+  .action(async (slug, { handle, name, template, team }) => {
     const sb = getClient();
     await requireUser(sb);
     const tpl = templates[template];
+    // Resolve the team first so a typo fails before anything is created.
+    const teamRow = team
+      ? check(await sb.from("teams").select("id").eq("slug", team).single<{ id: string }>())
+      : null;
     const ws = check(await sb.rpc("create_workspace", {
       p_slug: slug, p_name: name ?? slug, p_handle: handle, p_template: template, p_manifest: tpl.manifest,
     }).single<{ id: string; slug: string }>());
@@ -66,6 +71,7 @@ program.command("init")
     if (tpl.units.length) {
       check(await sb.from("units").insert(tpl.units.map((u) => ({ ...u, workspace_id: ws.id }))));
     }
+    if (teamRow) check(await sb.rpc("attach_workspace_to_team", { p_workspace: ws.id, p_team: teamRow.id }));
     saveConfig({ activeWorkspace: { id: ws.id, slug: ws.slug } });
     await core.setActiveWorkspace(sb, (await requireUser(sb)).id, ws.id);
     console.log(`Created workspace "${ws.slug}" from template ${template} (${tpl.units.length} units). It's now active.`);
