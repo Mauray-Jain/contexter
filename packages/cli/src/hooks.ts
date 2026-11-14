@@ -142,6 +142,19 @@ function emit(event: string, context: string) {
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: text } }));
 }
 
+// Set by context() when this hook moved the session off a workspace: what Claude must be told, since
+// SessionStart told it to pass that workspace to every contexter tool call.
+let moved: { from: string; to?: string } | undefined;
+
+function movedNotice(): string {
+  if (!moved) return "";
+  return moved.to
+    ? `[contexter] This folder is now linked to workspace "${moved.to}" instead of "${moved.from}". ` +
+      `From now on pass workspace "${moved.to}" to every contexter tool call; don't use "${moved.from}" in this session.`
+    : `[contexter] This folder is no longer linked to a contexter workspace (it was "${moved.from}"). ` +
+      "Stop calling contexter tools in this session unless the user asks, and don't post this work to any workspace.";
+}
+
 async function context(input: HookInput, opts: { create: boolean }) {
   // Not a linked folder: stay silent. A session attached before (a project that used to fall back to
   // the active workspace, or was unlinked or linked elsewhere since) is closed, so its task stops
@@ -154,8 +167,9 @@ async function context(input: HookInput, opts: { create: boolean }) {
     // Keep the state when the close fails, so a later hook retries it (and releases its locks).
     const { error } = await sb.rpc("end_session", { p_session: state.session });
     if (error) throw new Error(`closing the session of ${state.workspace}: ${error.message}`);
+    // Background runs keep their mappings (bgDir): their runs are closed by id, whatever the link.
     rmSync(statePath(input.session_id), { force: true });
-    rmSync(bgDir(input.session_id), { recursive: true, force: true });
+    moved = { from: state.workspace, to: workspace };
     state = null;
   }
   if (!workspace) return null;
@@ -181,7 +195,7 @@ async function startModalWatcher(ctx: core.Ctx, input: HookInput) {
 
 async function sessionStart(input: HookInput) {
   const c = await context(input, { create: true });
-  if (!c) return;
+  if (!c) return emit("SessionStart", movedNotice());
   const { ctx } = c;
   await startModalWatcher(ctx, input);
   // Mark the backlog as read: the memory context below already covers it.
@@ -201,17 +215,27 @@ async function sessionStart(input: HookInput) {
 
 async function userPromptSubmit(input: HookInput) {
   const c = await context(input, { create: true });
-  if (!c) return;
-  const { ctx, state } = c;
-  await startModalWatcher(ctx, input);
   const prompt = input.prompt ?? "";
   const isPrivate = /^\s*!private\b/i.test(prompt);
-  writeState(input.session_id, { ...state, private: isPrivate });
   // A background command ended: close its run here, so it never depends on Claude remembering to.
-  const closed = await closeBackgroundRuns(ctx, input.session_id, prompt, isPrivate).catch((err) => {
-    appendFileSync(join(home, "hooks.log"), `${new Date().toISOString()} close-run: ${err instanceof Error ? err.message : err}\n`);
-    return "";
-  });
+  // Its run is closed even when this folder was relinked or unlinked since the command started.
+  const closeRuns = async () => {
+    let db: core.Db;
+    if (c) db = c.ctx.db;
+    else { const sb = getClient(); await requireUser(sb); db = sb as unknown as core.Db; }
+    return closeBackgroundRuns({ db }, input.session_id, prompt, isPrivate).catch((err) => {
+      appendFileSync(join(home, "hooks.log"), `${new Date().toISOString()} close-run: ${err instanceof Error ? err.message : err}\n`);
+      return "";
+    });
+  };
+  if (!c) {
+    const closed = prompt.includes("<task-notification>") && existsSync(bgDir(input.session_id)) ? await closeRuns() : "";
+    return emit("UserPromptSubmit", [movedNotice(), closed].filter(Boolean).join("\n\n"));
+  }
+  const { ctx, state } = c;
+  await startModalWatcher(ctx, input);
+  writeState(input.session_id, { ...state, private: isPrivate });
+  const closed = await closeRuns();
   const shared = !isPrivate && prompt.trim() ? prompt : "";
   const promptEvent = shared ? await core.postPrompt(ctx, shared) : null;
   await core.startTask(ctx, shared || null, promptEvent);
@@ -221,7 +245,7 @@ async function userPromptSubmit(input: HookInput) {
   ]);
   emit("UserPromptSubmit", [
     isPrivate ? "[contexter] This message is private: it is not shared with the team. Don't post it." : "",
-    closed, handed, overlap, delta, now, runs, hint,
+    movedNotice(), closed, handed, overlap, delta, now, runs, hint,
   ].filter(Boolean).join("\n\n"));
 }
 
@@ -255,7 +279,7 @@ export function trustedOutputFile(path: string | undefined, sid: string, run: { 
 // Close the runs of this session's background commands that the prompt's notifications say ended.
 // A run Claude already reported is left as it is (update_run ignores a second report of an end).
 // In a private turn the run is still closed, but none of its output is shared.
-async function closeBackgroundRuns(ctx: core.Ctx, sid: string, prompt: string, isPrivate: boolean): Promise<string> {
+async function closeBackgroundRuns(ctx: Pick<core.Ctx, "db">, sid: string, prompt: string, isPrivate: boolean): Promise<string> {
   if (!prompt.includes("<task-notification>")) return "";
   const lines: string[] = [];
   for (const n of parseTaskNotifications(prompt)) {

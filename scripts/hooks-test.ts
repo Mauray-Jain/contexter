@@ -164,7 +164,8 @@ await step("other projects stay out of the workspace: only linked folders join i
   assert.match(cliIn(other, ["link", slug]), /Linked/);
   assert.match(hookIn(other, "UserPromptSubmit", { session_id: "alice-other", prompt: "Tidy the detector tests" }), new RegExp(slug));
   assert.match(cliIn(other, ["unlink"]), /Unlinked/);
-  assert.equal(hookIn(other, "UserPromptSubmit", { session_id: "alice-other", prompt: "Rename the detector helpers please" }), "");
+  assert.match(hookIn(other, "UserPromptSubmit", { session_id: "alice-other", prompt: "Rename the detector helpers please" }), /no longer linked/);
+  assert.equal(hookIn(other, "UserPromptSubmit", { session_id: "alice-other", prompt: "And the detector constants" }), "");
   hookIn(other, "Stop", { session_id: "alice-other", last_assistant_message: "Renamed the detector helpers." });
   assert.doesNotMatch(hook("bob", "UserPromptSubmit", { session_id: "bob-1", prompt: "and now?" }).context, /Rename the detector/);
 });
@@ -178,7 +179,8 @@ await step("a session relinked to another workspace starts afresh there and leav
   hookIn(other, "UserPromptSubmit", { session_id: "alice-relink", prompt: "Profile the detector inner loop" });
   assert.match(hook("bob", "UserPromptSubmit", { session_id: "bob-1", prompt: "who is busy?" }).context, /Profile the detector inner loop/);
   cliIn(other, ["link", second]);
-  hookIn(other, "UserPromptSubmit", { session_id: "alice-relink", prompt: "Vectorise the detector kernels now" });
+  const told = hookIn(other, "UserPromptSubmit", { session_id: "alice-relink", prompt: "Vectorise the detector kernels now" });
+  assert.match(told, new RegExp(`now linked to workspace "${second}" instead of "${slug}"`));
   // Another of alice's sessions in the second workspace sees the task there.
   const peer = join(root, "second-project");
   mkdirSync(peer, { recursive: true });
@@ -187,7 +189,20 @@ await step("a session relinked to another workspace starts afresh there and leav
   const bob = hook("bob", "UserPromptSubmit", { session_id: "bob-1", prompt: "who is busy now?" }).context;
   assert.doesNotMatch(bob, /Vectorise the detector/);
   assert.doesNotMatch(bob, /working on "Profile the detector/);
+  // A background command started while linked still closes its run after the folder is unlinked.
+  const bg = spawnSync("sh", ["-c", installedHooks("alice").PostToolUse], {
+    input: JSON.stringify({ hook_event_name: "PostToolUse", cwd: other, session_id: "alice-relink", tool_name: "Bash",
+      tool_use_id: "toolu_relink", tool_input: { command: "./train.sh", description: "Train", run_in_background: true },
+      tool_response: { backgroundTaskId: "task_relink" } }),
+    encoding: "utf8", cwd: other, env: { ...process.env, CONTEXTER_HOME: join(root, "alice", ".home") },
+  }).stdout;
+  const bgRun = Number(/now run #(\d+)/.exec(bg)?.[1]);
+  assert.ok(bgRun > 0);
   cliIn(other, ["unlink"]);
+  assert.match(hookIn(other, "UserPromptSubmit", { session_id: "alice-relink", prompt: "One more tweak" }), /no longer linked .*Stop calling contexter tools/);
+  assert.match(hookIn(other, "UserPromptSubmit", { session_id: "alice-relink",
+    prompt: "<task-notification>\n<task-id>task_relink</task-id>\n<status>completed</status>\n<summary>completed (exit code 0)</summary>\n</task-notification>" }),
+  new RegExp(`Run #${bgRun} ended \\(succeeded, exit 0\\)`));
   hookIn(other, "Stop", { session_id: "alice-relink", last_assistant_message: "Done." });
 });
 
@@ -199,6 +214,14 @@ await step("unlinking a folder inside a linked project opts it out instead of in
   assert.equal(JSON.parse(readFileSync(join(nested, ".contexter.json"), "utf8")).workspace, null);
   assert.equal(hookIn(nested, "UserPromptSubmit", { session_id: "alice-nested", prompt: "Patch the vendored parser" }), "");
   rmSync(nested, { recursive: true, force: true });
+
+  // A folder that only inherits the parent's link opts itself out; the parent stays linked.
+  const inherited = join(root, "alice", "scratch");
+  mkdirSync(inherited, { recursive: true });
+  cliIn(inherited, ["unlink"]);
+  assert.equal(JSON.parse(readFileSync(join(inherited, ".contexter.json"), "utf8")).workspace, null);
+  assert.equal(JSON.parse(readFileSync(join(root, "alice", ".contexter.json"), "utf8")).workspace, slug);
+  rmSync(inherited, { recursive: true, force: true });
 });
 
 // An approved edit: PreToolUse (checks), the tool runs, PostToolUse (records). Returns the check.

@@ -283,15 +283,18 @@ program.command("link")
 program.command("unlink")
   .description("Unlink this folder: Claude Code sessions here stop sharing with any workspace")
   .action(() => {
-    const root = projectRoot(process.cwd());
-    if (!root || !linkedWorkspace(process.cwd())) throw new CliError("This folder isn't linked to a workspace");
-    // Inside another linked folder, removing the file would inherit that link: opt out instead.
-    if (projectRoot(dirname(root)) && dirname(root) !== root) {
-      writeFileSync(join(root, ".contexter.json"), `${JSON.stringify({ workspace: null }, null, 2)}\n`);
+    const here = process.cwd();
+    const root = projectRoot(here);
+    if (!root || !linkedWorkspace(here)) throw new CliError("This folder isn't linked to a workspace");
+    // Only this folder changes. Opt it out when it inherits a parent's link (the parent and its other
+    // folders stay linked) or its own link would fall back to a parent's; otherwise remove its link.
+    const parent = dirname(here) !== here ? projectRoot(dirname(here)) : undefined;
+    if (root !== here || (parent && linkedWorkspace(parent))) {
+      writeFileSync(join(here, ".contexter.json"), `${JSON.stringify({ workspace: null }, null, 2)}\n`);
     } else {
-      rmSync(join(root, ".contexter.json"));
+      rmSync(join(here, ".contexter.json"));
     }
-    console.log(`Unlinked ${root}.`);
+    console.log(`Unlinked ${here}.`);
   });
 
 program.command("hook", { hidden: true })
