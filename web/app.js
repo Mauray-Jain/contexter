@@ -152,7 +152,7 @@ export function weave(names, { you } = {}) {
 export function dropdown({ options, value, onChange, label, variant = "", placeholder }) {
   let current = value ?? null;
   const text = el("span", { class: "dd-value" });
-  const btn = el("button", { type: "button", class: `dd ${variant}`.trim(), "aria-haspopup": "listbox", "aria-expanded": "false", "aria-label": label }, text, icon("chevron"));
+  const btn = el("button", { type: "button", class: `dd ${variant}`.trim(), "aria-haspopup": "listbox", "aria-expanded": "false", "aria-label": label }, variant === "quiet" ? icon("plus") : null, text, icon("chevron"));
   const wrap = el("span", { class: "dd-wrap" }, btn);
   let menu = null, active = 0;
   const paint = () => {
@@ -205,6 +205,35 @@ export function dropdown({ options, value, onChange, label, variant = "", placeh
   Object.defineProperty(wrap, "value", { get: () => current, set: (v) => { current = v; paint(); } });
   wrap.choose = (v) => { const o = options.find((x) => x.value === v); if (o) { current = null; choose(o); } };
   return wrap;
+}
+
+// ───────── inline confirm (pattern adapted from ObsidianUI's Active Sessions, MIT) ─────────
+// The button turns into "prompt · Cancel · Confirm" in place; while the request runs the row shows a
+// spinner; on success the row folds away; on failure the error shows in place with Try again.
+export function inlineConfirm({ label, prompt, confirmLabel, busyLabel = "Working…", action, onDone }) {
+  const host = el("span", { class: "confirm" });
+  const idle = () => host.replaceChildren(el("button", { type: "button", class: "btn-ghost btn-sm btn-danger", onclick: ask }, label));
+  function ask() {
+    const go = el("button", { type: "button", class: "btn-sm danger-solid", onclick: exec }, confirmLabel);
+    host.replaceChildren(el("span", { class: "confirm-q" }, prompt),
+      el("button", { type: "button", class: "btn-ghost btn-sm", onclick: () => { idle(); host.querySelector("button")?.focus(); } }, "Cancel"), go);
+    go.focus();
+  }
+  async function exec() {
+    host.replaceChildren(el("span", { class: "spinner", "aria-hidden": "true" }), el("span", { class: "confirm-q", role: "status" }, busyLabel));
+    try {
+      await action();
+      const row = host.closest("tr, li");
+      if (row && !matchMedia("(prefers-reduced-motion: reduce)").matches) { row.classList.add("fold"); await new Promise((r) => setTimeout(r, 260)); }
+      onDone?.();
+    } catch (e) {
+      host.replaceChildren(el("span", { class: "confirm-q status-err", role: "alert" }, e.message ?? String(e)),
+        el("button", { type: "button", class: "btn-ghost btn-sm", onclick: ask }, "Try again"));
+    }
+  }
+  host.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); idle(); host.querySelector("button")?.focus(); } });
+  idle();
+  return host;
 }
 
 // ───────── email tokens: type an address, press Enter, it becomes a chip ─────────

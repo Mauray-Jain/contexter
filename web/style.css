@@ -409,3 +409,30 @@ ol.steps p { color: var(--muted); margin-bottom: 8px; }
 .field-label { font-weight: 600; font-size: .9rem; }
 .field-block .hint { margin: 0; color: var(--muted); font-size: .8125rem; }
 .checks .dd-wrap { margin-left: auto; }
+
+/* ───────── one size for every small pill (badges, chips, role pickers, add buttons) ───────── */
+.pill, .chip, .dd.pill, .dd.quiet {
+  height: 28px; min-height: 28px; font-size: .8125rem; font-weight: 550; line-height: 1; letter-spacing: 0;
+  border-radius: 999px; white-space: nowrap;
+}
+.pill { display: inline-flex; align-items: center; padding: 0 11px; background: var(--surface-2); color: var(--text); }
+.pill.accent { background: var(--accent-soft); color: var(--accent-ink); }
+.dd.pill { padding: 0 7px 0 11px; gap: 4px; font-weight: 550; color: var(--text); }
+.dd.quiet { padding: 0 9px 0 8px; gap: 4px; font-weight: 550; color: var(--muted); }
+.dd.quiet .dd-value::before { content: none; }
+.chip { padding: 0 3px 0 11px; gap: 2px; font-weight: 550; }
+.chip .chip-role { color: var(--muted); font-weight: 500; padding: 0 9px 0 5px; }
+.dd.chip { height: 22px; min-height: 22px; font-size: .8125rem; font-weight: 500; color: var(--muted); padding: 0 4px 0 6px; gap: 2px; }
+.chip .x { width: 22px; min-height: 22px; height: 22px; padding: 0; border-radius: 50%; }
+.chip .x .icon, .dd.pill .icon, .dd.quiet .icon, .dd.chip .icon { width: 13px; height: 13px; }
+.dd { font-weight: 550; }
+td .btn-sm { font-weight: 550; }
+
+/* ───────── inline confirm ───────── */
+.confirm { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.confirm-q { font-size: .8125rem; color: var(--muted); margin-right: 2px; }
+.danger-solid { background: var(--danger); color: #fff; box-shadow: none; }
+@media (hover: hover) { button.danger-solid:not(:disabled):hover { background: var(--danger); color: #fff; opacity: .9; box-shadow: none; } }
+.spinner { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--border-strong); border-top-color: var(--muted); animation: spin .7s linear infinite; }
+@keyframes spin { to { rotate: 360deg; } }
+tr.fold, li.fold { transition-property: opacity, translate; transition-duration: .25s; transition-timing-function: ease-out; opacity: 0; translate: -8px 0; }

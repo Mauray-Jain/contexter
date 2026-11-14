@@ -16,7 +16,7 @@
 <script type="module">
   // Team management: people, projects, invitations and defaults. Everything goes through the
   // database functions, so the page can only do what the signed-in person is allowed to do.
-  import { PRODUCT, appShell, avatar, callFunction, command, dropdown, el, emailTokens, emptyMark, icon, requireSignIn, sb, setCommands, transition } from "../app.js";
+  import { PRODUCT, appShell, avatar, callFunction, command, dropdown, el, emailTokens, emptyMark, icon, inlineConfirm, requireSignIn, sb, setCommands, transition } from "../app.js";
 
   const main = document.getElementById("main");
   const user = await requireSignIn(main, { title: "Sign in to manage your team" });
@@ -60,7 +60,8 @@
         onChange: (v) => { history.replaceState(null, "", `?t=${v}${location.hash}`); loadTeams().then(render); } })
     : null;
 
-  const roleBadge = (r) => el("span", { class: `badge ${r === "owner" ? "accent" : ""}` }, r);
+  const cap = (r) => r.charAt(0).toUpperCase() + r.slice(1);
+  const roleBadge = (r) => el("span", { class: `pill ${r === "owner" ? "accent" : ""}` }, cap(r));
 
   // ───────── create a team ─────────
   function createTeamForm(first) {
@@ -96,24 +97,28 @@
       const chips = p.projects.map((x) => {
         const pname = projectName.get(x.workspace_id)?.name ?? "project";
         return el("span", { class: "chip" }, pname,
-          x.role === "owner" ? el("span", { class: "badge accent", style: "margin-left:6px" }, "owner") : dropdown({ variant: "chip", label: `${p.email} on ${pname}`, value: x.role,
-            options: [{ value: "editor", label: "editor" }, { value: "viewer", label: "viewer" }],
+          x.role === "owner" ? el("span", { class: "chip-role" }, "Owner") : dropdown({ variant: "chip", label: `${p.email} on ${pname}`, value: x.role,
+            options: [{ value: "editor", label: "Editor", hint: "can write" }, { value: "viewer", label: "Viewer", hint: "read only" }],
             onChange: async (v) => { if (await run(() => rpc("grant_project_access", { p_workspace: x.workspace_id, p_user: p.user_id, p_role: v }))) say("Access updated."); else render(); } }),
           x.role === "owner" ? null : el("button", { type: "button", class: "btn-ghost x", "aria-label": `Remove ${p.email} from ${pname}`, title: "Remove access", onclick: async () => {
             if (await run(() => rpc("revoke_project_access", { p_workspace: x.workspace_id, p_user: p.user_id }))) { say("Access removed."); render(); } } }, icon("x")));
       });
       const addable = ov.projects.filter((pr) => !have.has(pr.id));
       const add = addable.length ? dropdown({ variant: "quiet", label: `Add ${p.email} to a project`, placeholder: "Add to project",
-          options: addable.map((pr) => ({ value: pr.id, label: pr.name, hint: "as editor" })),
+          options: addable.map((pr) => ({ value: pr.id, label: pr.name, hint: "as Editor" })),
           onChange: async (v) => { if (await run(() => rpc("grant_project_access", { p_workspace: v, p_user: p.user_id, p_role: "editor" }))) { say("Access added."); render(); } } }) : null;
       const canRemove = me || myRole === "owner" || (myRole === "admin" && p.role === "member");
       return el("tr", {},
         el("td", {}, el("div", { class: "cell-person" }, avatar(p.email), el("div", {}, el("b", {}, p.email), me ? el("span", {}, "You") : null))),
         el("td", {}, roleCell),
         el("td", {}, el("div", { class: "chips" }, chips, add)),
-        el("td", {}, canRemove ? el("div", { class: "actions" }, el("button", { type: "button", class: "btn-ghost btn-sm btn-danger", onclick: async () => {
-          if (!confirm(me ? "Leave this team?" : `Remove ${p.email} from the team? They lose the project access the team gave them.`)) return;
-          if (await run(() => rpc("remove_team_member", { p_team: team.id, p_user: p.user_id }))) { say(me ? "You left the team." : "Member removed."); await loadTeams(); render(); } } }, me ? "Leave" : "Remove")) : null));
+        el("td", {}, canRemove ? el("div", { class: "actions" }, inlineConfirm({
+          label: me ? "Leave" : "Remove",
+          prompt: me ? "Leave this team?" : "Remove from the team?",
+          confirmLabel: me ? "Leave team" : "Remove",
+          busyLabel: me ? "Leaving…" : "Removing…",
+          action: () => rpc("remove_team_member", { p_team: team.id, p_user: p.user_id }),
+          onDone: async () => { say(me ? "You left the team." : `${p.email} was removed.`); await loadTeams(); render(); } })) : null));
     });
     return el("section", { class: "card" }, el("div", { class: "table-wrap" }, el("table", {},
       el("thead", {}, el("tr", {}, ["Person", "Team role", "Project access", ""].map((h) => el("th", {}, h)))), el("tbody", {}, rows))));
@@ -168,16 +173,16 @@
     return el("section", { class: "card" }, el("div", { class: "table-wrap" }, el("table", {},
       el("thead", {}, el("tr", {}, ["Email", "Access", "Expires", ""].map((h) => el("th", {}, h)))),
       el("tbody", {}, invites.map((i) => el("tr", {},
-        el("td", {}, el("div", { class: "cell-person" }, avatar(i.email), el("div", {}, el("b", {}, i.email), el("span", {}, i.team_role)))),
+        el("td", {}, el("div", { class: "cell-person" }, avatar(i.email), el("div", {}, el("b", {}, i.email), el("span", {}, cap(i.team_role))))),
         el("td", {}, (i.grants ?? []).length
-          ? el("div", { class: "chips" }, i.grants.map((g) => el("span", { class: "badge" }, `${names.get(g.workspace_id) ?? "project"} (${g.role})`)))
+          ? el("div", { class: "chips" }, i.grants.map((g) => el("span", { class: "chip" }, names.get(g.workspace_id) ?? "project", el("span", { class: "chip-role" }, cap(g.role)))))
           : el("span", { class: "muted" }, "Team only")),
         el("td", { class: "num muted" }, new Date(i.expires_at).toLocaleDateString()),
         el("td", {}, el("div", { class: "actions" },
           el("button", { type: "button", class: "btn-ghost btn-sm", onclick: async () => {
             if (await run(async () => { await callFunction("invite-members", { team: team.id, emails: [i.email], team_role: i.team_role, grants: i.grants }); })) { say(`Invitation resent to ${i.email}.`); render(); } } }, icon("refresh"), "Resend"),
-          el("button", { type: "button", class: "btn-ghost btn-sm btn-danger", onclick: async () => {
-            if (await run(() => rpc("revoke_invite", { p_invite: i.id }))) { say("Invitation revoked."); render(); } } }, "Revoke")))))))));
+          inlineConfirm({ label: "Revoke", prompt: "Revoke this invitation?", confirmLabel: "Revoke", busyLabel: "Revoking…",
+            action: () => rpc("revoke_invite", { p_invite: i.id }), onDone: () => { say(`The invitation to ${i.email} was revoked.`); render(); } })))))))));
   }
 
   // ───────── projects ─────────
