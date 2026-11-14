@@ -137,6 +137,142 @@ await step("!private turns are not shared", () => {
   assert.doesNotMatch(r.context, /secret/);
 });
 
+// Alice's installed hooks, run from another of her projects (a folder not linked to the workspace).
+function hookIn(dir: string, event: string, input: Record<string, unknown>) {
+  const r = spawnSync("sh", ["-c", installedHooks("alice")[event]], {
+    input: JSON.stringify({ hook_event_name: event, cwd: dir, ...input }), encoding: "utf8",
+    cwd: dir, env: { ...process.env, CONTEXTER_HOME: join(root, "alice", ".home") },
+  });
+  return r.stdout ? JSON.parse(r.stdout).hookSpecificOutput?.additionalContext ?? "" : "";
+}
+
+const cliIn = (dir: string, args: string[]) => spawnSync("node", [CLI, ...args], {
+  encoding: "utf8", cwd: dir, env: { ...process.env, CONTEXTER_HOME: join(root, "alice", ".home") },
+}).stdout;
+
+await step("other projects stay out of the workspace: only linked folders join it", () => {
+  const other = join(root, "other-project");
+  mkdirSync(other, { recursive: true });
+  // Alice's active workspace is this one, but the folder isn't linked: nothing is shown or shared.
+  assert.equal(hookIn(other, "SessionStart", { session_id: "alice-other", source: "startup" }), "");
+  assert.equal(hookIn(other, "UserPromptSubmit", { session_id: "alice-other", prompt: "Refactor the watermark detector module" }), "");
+  hookIn(other, "Stop", { session_id: "alice-other", last_assistant_message: "Refactored the watermark detector." });
+  const r = hook("bob", "UserPromptSubmit", { session_id: "bob-1", prompt: "anything new?" });
+  assert.doesNotMatch(r.context, /watermark/);
+
+  // Linking it joins the workspace; unlinking leaves it again, even for a session already attached.
+  assert.match(cliIn(other, ["link", slug]), /Linked/);
+  assert.match(hookIn(other, "UserPromptSubmit", { session_id: "alice-other", prompt: "Tidy the detector tests" }), new RegExp(slug));
+  assert.match(cliIn(other, ["unlink"]), /Unlinked/);
+  assert.match(hookIn(other, "UserPromptSubmit", { session_id: "alice-other", prompt: "Rename the detector helpers please" }), /no longer linked/);
+  assert.equal(hookIn(other, "UserPromptSubmit", { session_id: "alice-other", prompt: "And the detector constants" }), "");
+  hookIn(other, "Stop", { session_id: "alice-other", last_assistant_message: "Renamed the detector helpers." });
+  assert.doesNotMatch(hook("bob", "UserPromptSubmit", { session_id: "bob-1", prompt: "and now?" }).context, /Rename the detector/);
+});
+
+await step("a session relinked to another workspace starts afresh there and leaves the old one", () => {
+  const other = join(root, "other-project");
+  const second = `${slug}-b`;
+  cliIn(other, ["init", second, "--handle", "alice"]);
+  cliIn(other, ["use", slug]);
+  cliIn(other, ["link", slug]);
+  hookIn(other, "UserPromptSubmit", { session_id: "alice-relink", prompt: "Profile the detector inner loop" });
+  assert.match(hook("bob", "UserPromptSubmit", { session_id: "bob-1", prompt: "who is busy?" }).context, /Profile the detector inner loop/);
+  cliIn(other, ["link", second]);
+  const told = hookIn(other, "UserPromptSubmit", { session_id: "alice-relink", prompt: "Vectorise the detector kernels now" });
+  assert.match(told, new RegExp(`now linked to workspace "${second}" instead of "${slug}"`));
+  // Another of alice's sessions in the second workspace sees the task there.
+  const peer = join(root, "second-project");
+  mkdirSync(peer, { recursive: true });
+  cliIn(peer, ["link", second]);
+  assert.match(hookIn(peer, "SessionStart", { session_id: "alice-peer", source: "startup" }), /Vectorise the detector kernels/);
+  const bob = hook("bob", "UserPromptSubmit", { session_id: "bob-1", prompt: "who is busy now?" }).context;
+  assert.doesNotMatch(bob, /Vectorise the detector/);
+  assert.doesNotMatch(bob, /working on "Profile the detector/);
+  // A background command started while linked still closes its run after the folder is unlinked.
+  const bg = spawnSync("sh", ["-c", installedHooks("alice").PostToolUse], {
+    input: JSON.stringify({ hook_event_name: "PostToolUse", cwd: other, session_id: "alice-relink", tool_name: "Bash",
+      tool_use_id: "toolu_relink", tool_input: { command: "./train.sh", description: "Train", run_in_background: true },
+      tool_response: { backgroundTaskId: "task_relink" } }),
+    encoding: "utf8", cwd: other, env: { ...process.env, CONTEXTER_HOME: join(root, "alice", ".home") },
+  }).stdout;
+  const bgRun = Number(/now run #(\d+)/.exec(bg)?.[1]);
+  assert.ok(bgRun > 0);
+  cliIn(other, ["unlink"]);
+  assert.match(hookIn(other, "UserPromptSubmit", { session_id: "alice-relink", prompt: "One more tweak" }), /no longer linked .*Stop calling contexter tools/);
+  assert.match(hookIn(other, "UserPromptSubmit", { session_id: "alice-relink",
+    prompt: "<task-notification>\n<task-id>task_relink</task-id>\n<status>completed</status>\n<summary>completed (exit code 0)</summary>\n</task-notification>" }),
+  new RegExp(`Run #${bgRun} ended \\(succeeded, exit 0\\)`));
+  hookIn(other, "Stop", { session_id: "alice-relink", last_assistant_message: "Done." });
+});
+
+await step("Claude is told the session's workspace whenever it changes outside SessionStart", () => {
+  const late = join(root, "late-project");
+  mkdirSync(late, { recursive: true });
+  // Linked mid-session: the next prompt names the workspace, once.
+  assert.equal(hookIn(late, "UserPromptSubmit", { session_id: "alice-late", prompt: "Sketch the cache layer" }), "");
+  cliIn(late, ["link", slug]);
+  assert.match(hookIn(late, "UserPromptSubmit", { session_id: "alice-late", prompt: "Now wire the cache layer" }),
+    new RegExp(`now linked to the shared contexter workspace "${slug}"`));
+  assert.doesNotMatch(hookIn(late, "UserPromptSubmit", { session_id: "alice-late", prompt: "And test the cache" }), /now linked/);
+  // Unlinked, and first noticed by Stop: the notice still reaches the next prompt.
+  cliIn(late, ["unlink"]);
+  hookIn(late, "Stop", { session_id: "alice-late", last_assistant_message: "Tested the cache." });
+  assert.match(hookIn(late, "UserPromptSubmit", { session_id: "alice-late", prompt: "Anything else?" }), /no longer linked/);
+  // Unlinked then relinked before a prompt hook ran: no stale "unlinked" notice.
+  cliIn(late, ["link", slug]);
+  hookIn(late, "Stop", { session_id: "alice-late", last_assistant_message: "ok" });
+  cliIn(late, ["unlink"]);
+  hookIn(late, "Stop", { session_id: "alice-late", last_assistant_message: "ok" });
+  cliIn(late, ["link", slug]);
+  assert.doesNotMatch(hookIn(late, "UserPromptSubmit", { session_id: "alice-late", prompt: "Back to the cache" }), /no longer linked/);
+  cliIn(late, ["unlink"]);
+  hookIn(late, "Stop", { session_id: "alice-late", last_assistant_message: "ok" }); // closes the session
+  // Relinked elsewhere, then unlinked, both noticed only by Stop: the prompt hears "unlinked".
+  cliIn(late, ["link", slug]);
+  hookIn(late, "UserPromptSubmit", { session_id: "alice-late", prompt: "Cache again" });
+  cliIn(late, ["link", `${slug}-b`]);
+  hookIn(late, "Stop", { session_id: "alice-late", last_assistant_message: "ok" });
+  cliIn(late, ["unlink"]);
+  hookIn(late, "Stop", { session_id: "alice-late", last_assistant_message: "ok" });
+  const told = hookIn(late, "UserPromptSubmit", { session_id: "alice-late", prompt: "Where am I?" });
+  assert.match(told, /no longer linked/);
+  assert.doesNotMatch(told, /pass workspace/);
+  // A folder attached only through CONTEXTER_WORKSPACE can be unlinked too.
+  const envOnly = join(root, "env-only");
+  mkdirSync(envOnly, { recursive: true });
+  const e = spawnSync("node", [CLI, "unlink"], {
+    encoding: "utf8", cwd: envOnly, env: { ...process.env, CONTEXTER_HOME: join(root, "alice", ".home"), CONTEXTER_WORKSPACE: slug },
+  });
+  assert.match(e.stdout, /Unlinked/);
+  assert.equal(JSON.parse(readFileSync(join(envOnly, ".contexter.json"), "utf8")).workspace, null);
+  // With CONTEXTER_WORKSPACE set, unlink opts the folder out rather than falling back to it.
+  cliIn(late, ["link", slug]);
+  const r = spawnSync("node", [CLI, "unlink"], {
+    encoding: "utf8", cwd: late, env: { ...process.env, CONTEXTER_HOME: join(root, "alice", ".home"), CONTEXTER_WORKSPACE: slug },
+  });
+  assert.match(r.stdout, /Unlinked/);
+  assert.equal(JSON.parse(readFileSync(join(late, ".contexter.json"), "utf8")).workspace, null);
+});
+
+await step("unlinking a folder inside a linked project opts it out instead of inheriting the parent", () => {
+  const nested = join(root, "alice", "vendor-lib");
+  mkdirSync(nested, { recursive: true });
+  cliIn(nested, ["link", slug]);
+  assert.match(cliIn(nested, ["unlink"]), /Unlinked/);
+  assert.equal(JSON.parse(readFileSync(join(nested, ".contexter.json"), "utf8")).workspace, null);
+  assert.equal(hookIn(nested, "UserPromptSubmit", { session_id: "alice-nested", prompt: "Patch the vendored parser" }), "");
+  rmSync(nested, { recursive: true, force: true });
+
+  // A folder that only inherits the parent's link opts itself out; the parent stays linked.
+  const inherited = join(root, "alice", "scratch");
+  mkdirSync(inherited, { recursive: true });
+  cliIn(inherited, ["unlink"]);
+  assert.equal(JSON.parse(readFileSync(join(inherited, ".contexter.json"), "utf8")).workspace, null);
+  assert.equal(JSON.parse(readFileSync(join(root, "alice", ".contexter.json"), "utf8")).workspace, slug);
+  rmSync(inherited, { recursive: true, force: true });
+});
+
 // An approved edit: PreToolUse (checks), the tool runs, PostToolUse (records). Returns the check.
 const editInput = (who: string, session: string, file: string) =>
   ({ session_id: session, tool_name: "Edit", tool_input: { file_path: join(root, who, file), old_string: "a", new_string: "b" } });

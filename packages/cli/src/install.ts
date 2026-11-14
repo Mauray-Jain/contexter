@@ -74,6 +74,8 @@ export function installCode(opts: { scope: "user" | "project"; workspace?: strin
   if (opts.workspace) {
     writeFileSync(join(opts.cwd, ".contexter.json"), `${JSON.stringify({ workspace: opts.workspace }, null, 2)}\n`);
     done.push(`This folder is linked to workspace "${opts.workspace}" (.contexter.json)`);
+  } else {
+    done.push("Sessions only join a workspace in a linked project folder: run `contexter link <slug>` in each one.");
   }
   return [
     ...done,

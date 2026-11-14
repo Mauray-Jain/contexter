@@ -110,14 +110,21 @@ export function projectRoot(cwd: string): string | undefined {
   }
 }
 
-// Which workspace a project belongs to: a .contexter.json in the project (or a parent),
-// then CONTEXTER_WORKSPACE, then the CLI's active workspace.
-export function projectWorkspace(cwd: string): string | undefined {
+// The workspace a folder is linked to: a .contexter.json in it (or a parent), then
+// CONTEXTER_WORKSPACE. Hooks only attach to linked folders: with hooks installed for the whole
+// machine, every other project (and its tasks) would otherwise land in the active workspace.
+export function linkedWorkspace(cwd: string): string | undefined {
   const root = projectRoot(cwd);
   if (root) {
-    try { return JSON.parse(readFileSync(join(root, ".contexter.json"), "utf8")).workspace; } catch { return undefined; }
+    // { "workspace": null } opts a folder out, even inside a linked parent (see `contexter unlink`).
+    try { return JSON.parse(readFileSync(join(root, ".contexter.json"), "utf8")).workspace || undefined; } catch { return undefined; }
   }
-  return process.env.CONTEXTER_WORKSPACE ?? loadConfig().activeWorkspace?.slug;
+  return process.env.CONTEXTER_WORKSPACE || undefined;
+}
+
+// Which workspace a CLI command run here works on: the linked one, else the CLI's active workspace.
+export function projectWorkspace(cwd: string): string | undefined {
+  return linkedWorkspace(cwd) ?? loadConfig().activeWorkspace?.slug;
 }
 
 // A file path as teammates see it: relative to the project root (or cwd), with / separators.
@@ -135,16 +142,78 @@ function emit(event: string, context: string) {
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: text } }));
 }
 
+// What Claude must be told about which workspace this session is in, when that changed outside
+// SessionStart (a relink, an unlink, a folder linked mid-session). Any hook can notice the change but
+// only SessionStart and UserPromptSubmit reach Claude, so it waits in a file until one of them shows it.
+const noticePath = (sid: string) => join(stateDir, `${sid.replace(/[^\w-]/g, "_")}.notice`);
+
+// The pending notice says where the session went last; a later change replaces it, keeping where
+// Claude was last told it is (from).
+interface Move { from?: string; to?: string }
+function pendingMove(sid: string): Move | undefined {
+  try { return JSON.parse(readFileSync(noticePath(sid), "utf8")); } catch { return undefined; }
+}
+
+function noteAttachment(sid: string, from: string | undefined, to: string | undefined) {
+  const prior = pendingMove(sid);
+  const move: Move = { from: prior ? prior.from : from, to };
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  writeFileSync(noticePath(sid), JSON.stringify(move), { mode: 0o600 });
+}
+
+function moveText({ from, to }: Move): string {
+  if (from === to) return "";
+  return !to
+    ? `[contexter] This folder is no longer linked to a contexter workspace (it was "${from}"). ` +
+      "Stop calling contexter tools in this session unless the user asks, and don't post this work to any workspace."
+    : `[contexter] This folder is ${from ? `now linked to workspace "${to}" instead of "${from}"` : `now linked to the shared contexter workspace "${to}"`}. ` +
+      `From now on pass workspace "${to}" to every contexter tool call${from ? `; don't use "${from}" in this session` : ""}, ` +
+      "and follow contexter's rules.";
+}
+
+// The pending notice, cleared once shown.
+function takeNotice(sid: string): string {
+  const move = pendingMove(sid);
+  rmSync(noticePath(sid), { force: true });
+  return move ? moveText(move) : "";
+}
+
 async function context(input: HookInput, opts: { create: boolean }) {
+  // Not a linked folder: stay silent. A session attached before (a project that used to fall back to
+  // the active workspace, or was unlinked or linked elsewhere since) is closed, so its task stops
+  // showing as in progress to the old workspace.
+  const workspace = linkedWorkspace(input.cwd ?? process.cwd());
+  let state = readState(input.session_id);
+  if (state && state.workspace !== workspace) {
+    // Tell Claude first: the notice must not depend on reaching the server.
+    noteAttachment(input.session_id, state.workspace, workspace);
+    const sb = getClient();
+    await requireUser(sb);
+    // Keep the state when the close fails, so a later hook retries it (and releases its locks); this
+    // hook stays detached meanwhile, so nothing more is shared with either workspace.
+    const { error } = await sb.rpc("end_session", { p_session: state.session });
+    if (error) {
+      appendFileSync(join(home, "hooks.log"), `${new Date().toISOString()} closing the session of ${state.workspace}: ${error.message}\n`);
+      return null;
+    }
+    // Background runs keep their mappings (bgDir): their runs are closed by id, whatever the link.
+    rmSync(statePath(input.session_id), { force: true });
+    state = null;
+  }
+  // A notice still waiting must name where the session is now, even if no session was created since.
+  const pending = state ? undefined : pendingMove(input.session_id);
+  if (pending && pending.to !== workspace) noteAttachment(input.session_id, undefined, workspace);
+  if (!workspace) return null;
+  if (!state && !opts.create) return null;
+  // A session that starts outside SessionStart (the folder was linked mid-session) must be told too.
+  if (!state && input.hook_event_name !== "SessionStart") noteAttachment(input.session_id, undefined, workspace);
   const sb = getClient();
   const user = await requireUser(sb);
-  const state = readState(input.session_id);
-  const workspace = state?.workspace ?? projectWorkspace(input.cwd ?? process.cwd());
-  if (!workspace) return null; // not a contexter project; stay silent
-  if (!state && !opts.create) return null;
   const ctx = await core.loadCtx(sb, user.id, state
     ? { workspace, session: state.session }
-    : { workspace, client: "claude-code", externalId: input.session_id, title: basename(input.cwd ?? "") });
+    // One contexter session per Claude Code session and workspace: ensure_session matches on the
+    // external id alone, so a session relinked to another workspace must not reopen its old row.
+    : { workspace, client: "claude-code", externalId: `${workspace}:${input.session_id}`, title: basename(input.cwd ?? "") });
   if (!state) writeState(input.session_id, { workspace: ctx.ws.slug, session: ctx.session! });
   return { ctx, state: readState(input.session_id)! };
 }
@@ -159,7 +228,7 @@ async function startModalWatcher(ctx: core.Ctx, input: HookInput) {
 
 async function sessionStart(input: HookInput) {
   const c = await context(input, { create: true });
-  if (!c) return;
+  if (!c) return emit("SessionStart", takeNotice(input.session_id));
   const { ctx } = c;
   await startModalWatcher(ctx, input);
   // Mark the backlog as read: the memory context below already covers it.
@@ -171,24 +240,36 @@ async function sessionStart(input: HookInput) {
     `This project is the shared contexter workspace "${ctx.ws.slug}". Teammates use their own Claude on the same workspace; ` +
     "contexter keeps everyone in sync. Before each user message you'll receive a team feed block with what teammates and " +
     "their Claudes did. Use the contexter MCP tools to read and write shared units (always with expected_version), to record " +
-    "reasoning (record), and to message teammates (mention). If the user's message starts with !private it is not shared.",
+    "reasoning (record), and to message teammates (mention). If the user's message starts with !private it is not shared. " +
+    `Pass workspace "${ctx.ws.slug}" to every contexter tool call in this session.`,
     handed, overview, memory, runs, hint,
   ].filter(Boolean).join("\n\n"));
+  takeNotice(input.session_id); // shown: the introduction above names the workspace
 }
 
 async function userPromptSubmit(input: HookInput) {
   const c = await context(input, { create: true });
-  if (!c) return;
-  const { ctx, state } = c;
-  await startModalWatcher(ctx, input);
   const prompt = input.prompt ?? "";
   const isPrivate = /^\s*!private\b/i.test(prompt);
-  writeState(input.session_id, { ...state, private: isPrivate });
   // A background command ended: close its run here, so it never depends on Claude remembering to.
-  const closed = await closeBackgroundRuns(ctx, input.session_id, prompt, isPrivate).catch((err) => {
-    appendFileSync(join(home, "hooks.log"), `${new Date().toISOString()} close-run: ${err instanceof Error ? err.message : err}\n`);
-    return "";
-  });
+  // Its run is closed even when this folder was relinked or unlinked since the command started.
+  const closeRuns = async () => {
+    let db: core.Db;
+    if (c) db = c.ctx.db;
+    else { const sb = getClient(); await requireUser(sb); db = sb as unknown as core.Db; }
+    return closeBackgroundRuns({ db }, input.session_id, prompt, isPrivate).catch((err) => {
+      appendFileSync(join(home, "hooks.log"), `${new Date().toISOString()} close-run: ${err instanceof Error ? err.message : err}\n`);
+      return "";
+    });
+  };
+  if (!c) {
+    const closed = prompt.includes("<task-notification>") && existsSync(bgDir(input.session_id)) ? await closeRuns() : "";
+    return emit("UserPromptSubmit", [takeNotice(input.session_id), closed].filter(Boolean).join("\n\n"));
+  }
+  const { ctx, state } = c;
+  await startModalWatcher(ctx, input);
+  writeState(input.session_id, { ...state, private: isPrivate });
+  const closed = await closeRuns();
   const shared = !isPrivate && prompt.trim() ? prompt : "";
   const promptEvent = shared ? await core.postPrompt(ctx, shared) : null;
   await core.startTask(ctx, shared || null, promptEvent);
@@ -198,7 +279,7 @@ async function userPromptSubmit(input: HookInput) {
   ]);
   emit("UserPromptSubmit", [
     isPrivate ? "[contexter] This message is private: it is not shared with the team. Don't post it." : "",
-    closed, handed, overlap, delta, now, runs, hint,
+    takeNotice(input.session_id), closed, handed, overlap, delta, now, runs, hint,
   ].filter(Boolean).join("\n\n"));
 }
 
@@ -232,7 +313,7 @@ export function trustedOutputFile(path: string | undefined, sid: string, run: { 
 // Close the runs of this session's background commands that the prompt's notifications say ended.
 // A run Claude already reported is left as it is (update_run ignores a second report of an end).
 // In a private turn the run is still closed, but none of its output is shared.
-async function closeBackgroundRuns(ctx: core.Ctx, sid: string, prompt: string, isPrivate: boolean): Promise<string> {
+async function closeBackgroundRuns(ctx: Pick<core.Ctx, "db">, sid: string, prompt: string, isPrivate: boolean): Promise<string> {
   if (!prompt.includes("<task-notification>")) return "";
   const lines: string[] = [];
   for (const n of parseTaskNotifications(prompt)) {
@@ -397,11 +478,15 @@ async function backgroundCommand(input: HookInput) {
 
 async function sessionEnd(input: HookInput) {
   const state = readState(input.session_id);
+  // A session detached by an unlink has no state left, but may still have a notice and run mappings.
+  rmSync(noticePath(input.session_id), { force: true });
+  rmSync(bgDir(input.session_id), { recursive: true, force: true });
   if (!state) return;
   const sb = getClient();
   await requireUser(sb);
   await sb.rpc("end_session", { p_session: state.session });
   rmSync(statePath(input.session_id), { force: true });
+  rmSync(noticePath(input.session_id), { force: true });
   rmSync(bgDir(input.session_id), { recursive: true, force: true });
 }
 
