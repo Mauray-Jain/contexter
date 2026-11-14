@@ -287,9 +287,9 @@ program.command("unlink")
     const root = projectRoot(here);
     if (!root || !linkedWorkspace(here)) throw new CliError("This folder isn't linked to a workspace");
     // Only this folder changes. Opt it out when it inherits a parent's link (the parent and its other
-    // folders stay linked) or its own link would fall back to a parent's; otherwise remove its link.
+    // folders stay linked) or removing its link would fall back to a parent's or CONTEXTER_WORKSPACE.
     const parent = dirname(here) !== here ? projectRoot(dirname(here)) : undefined;
-    if (root !== here || (parent && linkedWorkspace(parent))) {
+    if (root !== here || (parent && linkedWorkspace(parent)) || process.env.CONTEXTER_WORKSPACE) {
       writeFileSync(join(here, ".contexter.json"), `${JSON.stringify({ workspace: null }, null, 2)}\n`);
     } else {
       rmSync(join(here, ".contexter.json"));

@@ -142,17 +142,29 @@ function emit(event: string, context: string) {
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: text } }));
 }
 
-// Set by context() when this hook moved the session off a workspace: what Claude must be told, since
-// SessionStart told it to pass that workspace to every contexter tool call.
-let moved: { from: string; to?: string } | undefined;
+// What Claude must be told about which workspace this session is in, when that changed outside
+// SessionStart (a relink, an unlink, a folder linked mid-session). Any hook can notice the change but
+// only SessionStart and UserPromptSubmit reach Claude, so it waits in a file until one of them shows it.
+const noticePath = (sid: string) => join(stateDir, `${sid.replace(/[^\w-]/g, "_")}.notice`);
 
-function movedNotice(): string {
-  if (!moved) return "";
-  return moved.to
-    ? `[contexter] This folder is now linked to workspace "${moved.to}" instead of "${moved.from}". ` +
-      `From now on pass workspace "${moved.to}" to every contexter tool call; don't use "${moved.from}" in this session.`
-    : `[contexter] This folder is no longer linked to a contexter workspace (it was "${moved.from}"). ` +
-      "Stop calling contexter tools in this session unless the user asks, and don't post this work to any workspace.";
+function noteAttachment(sid: string, from: string | undefined, to: string | undefined) {
+  const text = !to
+    ? `[contexter] This folder is no longer linked to a contexter workspace (it was "${from}"). ` +
+      "Stop calling contexter tools in this session unless the user asks, and don't post this work to any workspace."
+    : `[contexter] This folder is ${from ? `now linked to workspace "${to}" instead of "${from}"` : `now linked to the shared contexter workspace "${to}"`}. ` +
+      `From now on pass workspace "${to}" to every contexter tool call${from ? `; don't use "${from}" in this session` : ""}, ` +
+      "and follow contexter's rules (sync first, post_turn after real work).";
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  writeFileSync(noticePath(sid), text, { mode: 0o600 });
+}
+
+// The pending notice, cleared once shown.
+function takeNotice(sid: string): string {
+  try {
+    const text = readFileSync(noticePath(sid), "utf8");
+    rmSync(noticePath(sid), { force: true });
+    return text;
+  } catch { return ""; }
 }
 
 async function context(input: HookInput, opts: { create: boolean }) {
@@ -169,11 +181,15 @@ async function context(input: HookInput, opts: { create: boolean }) {
     if (error) throw new Error(`closing the session of ${state.workspace}: ${error.message}`);
     // Background runs keep their mappings (bgDir): their runs are closed by id, whatever the link.
     rmSync(statePath(input.session_id), { force: true });
-    moved = { from: state.workspace, to: workspace };
+    noteAttachment(input.session_id, state.workspace, workspace);
     state = null;
   }
   if (!workspace) return null;
   if (!state && !opts.create) return null;
+  // A session that starts outside SessionStart (the folder was linked mid-session) must be told too.
+  if (!state && input.hook_event_name !== "SessionStart" && !existsSync(noticePath(input.session_id))) {
+    noteAttachment(input.session_id, undefined, workspace);
+  }
   const sb = getClient();
   const user = await requireUser(sb);
   const ctx = await core.loadCtx(sb, user.id, state
@@ -195,7 +211,8 @@ async function startModalWatcher(ctx: core.Ctx, input: HookInput) {
 
 async function sessionStart(input: HookInput) {
   const c = await context(input, { create: true });
-  if (!c) return emit("SessionStart", movedNotice());
+  if (!c) return emit("SessionStart", takeNotice(input.session_id));
+  takeNotice(input.session_id); // its introduction below names the workspace
   const { ctx } = c;
   await startModalWatcher(ctx, input);
   // Mark the backlog as read: the memory context below already covers it.
@@ -230,7 +247,7 @@ async function userPromptSubmit(input: HookInput) {
   };
   if (!c) {
     const closed = prompt.includes("<task-notification>") && existsSync(bgDir(input.session_id)) ? await closeRuns() : "";
-    return emit("UserPromptSubmit", [movedNotice(), closed].filter(Boolean).join("\n\n"));
+    return emit("UserPromptSubmit", [takeNotice(input.session_id), closed].filter(Boolean).join("\n\n"));
   }
   const { ctx, state } = c;
   await startModalWatcher(ctx, input);
@@ -245,7 +262,7 @@ async function userPromptSubmit(input: HookInput) {
   ]);
   emit("UserPromptSubmit", [
     isPrivate ? "[contexter] This message is private: it is not shared with the team. Don't post it." : "",
-    movedNotice(), closed, handed, overlap, delta, now, runs, hint,
+    takeNotice(input.session_id), closed, handed, overlap, delta, now, runs, hint,
   ].filter(Boolean).join("\n\n"));
 }
 
@@ -449,6 +466,7 @@ async function sessionEnd(input: HookInput) {
   await requireUser(sb);
   await sb.rpc("end_session", { p_session: state.session });
   rmSync(statePath(input.session_id), { force: true });
+  rmSync(noticePath(input.session_id), { force: true });
   rmSync(bgDir(input.session_id), { recursive: true, force: true });
 }
 

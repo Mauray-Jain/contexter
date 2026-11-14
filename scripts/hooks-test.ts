@@ -206,6 +206,28 @@ await step("a session relinked to another workspace starts afresh there and leav
   hookIn(other, "Stop", { session_id: "alice-relink", last_assistant_message: "Done." });
 });
 
+await step("Claude is told the session's workspace whenever it changes outside SessionStart", () => {
+  const late = join(root, "late-project");
+  mkdirSync(late, { recursive: true });
+  // Linked mid-session: the next prompt names the workspace, once.
+  assert.equal(hookIn(late, "UserPromptSubmit", { session_id: "alice-late", prompt: "Sketch the cache layer" }), "");
+  cliIn(late, ["link", slug]);
+  assert.match(hookIn(late, "UserPromptSubmit", { session_id: "alice-late", prompt: "Now wire the cache layer" }),
+    new RegExp(`now linked to the shared contexter workspace "${slug}"`));
+  assert.doesNotMatch(hookIn(late, "UserPromptSubmit", { session_id: "alice-late", prompt: "And test the cache" }), /now linked/);
+  // Unlinked, and first noticed by Stop: the notice still reaches the next prompt.
+  cliIn(late, ["unlink"]);
+  hookIn(late, "Stop", { session_id: "alice-late", last_assistant_message: "Tested the cache." });
+  assert.match(hookIn(late, "UserPromptSubmit", { session_id: "alice-late", prompt: "Anything else?" }), /no longer linked/);
+  // With CONTEXTER_WORKSPACE set, unlink opts the folder out rather than falling back to it.
+  cliIn(late, ["link", slug]);
+  const r = spawnSync("node", [CLI, "unlink"], {
+    encoding: "utf8", cwd: late, env: { ...process.env, CONTEXTER_HOME: join(root, "alice", ".home"), CONTEXTER_WORKSPACE: slug },
+  });
+  assert.match(r.stdout, /Unlinked/);
+  assert.equal(JSON.parse(readFileSync(join(late, ".contexter.json"), "utf8")).workspace, null);
+});
+
 await step("unlinking a folder inside a linked project opts it out instead of inheriting the parent", () => {
   const nested = join(root, "alice", "vendor-lib");
   mkdirSync(nested, { recursive: true });
