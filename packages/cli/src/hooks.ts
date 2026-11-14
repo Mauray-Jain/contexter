@@ -147,24 +147,35 @@ function emit(event: string, context: string) {
 // only SessionStart and UserPromptSubmit reach Claude, so it waits in a file until one of them shows it.
 const noticePath = (sid: string) => join(stateDir, `${sid.replace(/[^\w-]/g, "_")}.notice`);
 
+// The pending notice says where the session went last; a later change replaces it, keeping where
+// Claude was last told it is (from).
+interface Move { from?: string; to?: string }
+function pendingMove(sid: string): Move | undefined {
+  try { return JSON.parse(readFileSync(noticePath(sid), "utf8")); } catch { return undefined; }
+}
+
 function noteAttachment(sid: string, from: string | undefined, to: string | undefined) {
-  const text = !to
+  const prior = pendingMove(sid);
+  const move: Move = { from: prior ? prior.from : from, to };
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  writeFileSync(noticePath(sid), JSON.stringify(move), { mode: 0o600 });
+}
+
+function moveText({ from, to }: Move): string {
+  if (from === to) return "";
+  return !to
     ? `[contexter] This folder is no longer linked to a contexter workspace (it was "${from}"). ` +
       "Stop calling contexter tools in this session unless the user asks, and don't post this work to any workspace."
     : `[contexter] This folder is ${from ? `now linked to workspace "${to}" instead of "${from}"` : `now linked to the shared contexter workspace "${to}"`}. ` +
       `From now on pass workspace "${to}" to every contexter tool call${from ? `; don't use "${from}" in this session` : ""}, ` +
       "and follow contexter's rules (sync first, post_turn after real work).";
-  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-  writeFileSync(noticePath(sid), text, { mode: 0o600 });
 }
 
 // The pending notice, cleared once shown.
 function takeNotice(sid: string): string {
-  try {
-    const text = readFileSync(noticePath(sid), "utf8");
-    rmSync(noticePath(sid), { force: true });
-    return text;
-  } catch { return ""; }
+  const move = pendingMove(sid);
+  rmSync(noticePath(sid), { force: true });
+  return move ? moveText(move) : "";
 }
 
 async function context(input: HookInput, opts: { create: boolean }) {
@@ -187,9 +198,7 @@ async function context(input: HookInput, opts: { create: boolean }) {
   if (!workspace) return null;
   if (!state && !opts.create) return null;
   // A session that starts outside SessionStart (the folder was linked mid-session) must be told too.
-  if (!state && input.hook_event_name !== "SessionStart" && !existsSync(noticePath(input.session_id))) {
-    noteAttachment(input.session_id, undefined, workspace);
-  }
+  if (!state && input.hook_event_name !== "SessionStart") noteAttachment(input.session_id, undefined, workspace);
   const sb = getClient();
   const user = await requireUser(sb);
   const ctx = await core.loadCtx(sb, user.id, state

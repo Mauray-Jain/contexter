@@ -219,6 +219,23 @@ await step("Claude is told the session's workspace whenever it changes outside S
   cliIn(late, ["unlink"]);
   hookIn(late, "Stop", { session_id: "alice-late", last_assistant_message: "Tested the cache." });
   assert.match(hookIn(late, "UserPromptSubmit", { session_id: "alice-late", prompt: "Anything else?" }), /no longer linked/);
+  // Unlinked then relinked before a prompt hook ran: no stale "unlinked" notice.
+  cliIn(late, ["link", slug]);
+  hookIn(late, "Stop", { session_id: "alice-late", last_assistant_message: "ok" });
+  cliIn(late, ["unlink"]);
+  hookIn(late, "Stop", { session_id: "alice-late", last_assistant_message: "ok" });
+  cliIn(late, ["link", slug]);
+  assert.doesNotMatch(hookIn(late, "UserPromptSubmit", { session_id: "alice-late", prompt: "Back to the cache" }), /no longer linked/);
+  cliIn(late, ["unlink"]);
+  hookIn(late, "Stop", { session_id: "alice-late", last_assistant_message: "ok" }); // closes the session
+  // A folder attached only through CONTEXTER_WORKSPACE can be unlinked too.
+  const envOnly = join(root, "env-only");
+  mkdirSync(envOnly, { recursive: true });
+  const e = spawnSync("node", [CLI, "unlink"], {
+    encoding: "utf8", cwd: envOnly, env: { ...process.env, CONTEXTER_HOME: join(root, "alice", ".home"), CONTEXTER_WORKSPACE: slug },
+  });
+  assert.match(e.stdout, /Unlinked/);
+  assert.equal(JSON.parse(readFileSync(join(envOnly, ".contexter.json"), "utf8")).workspace, null);
   // With CONTEXTER_WORKSPACE set, unlink opts the folder out rather than falling back to it.
   cliIn(late, ["link", slug]);
   const r = spawnSync("node", [CLI, "unlink"], {

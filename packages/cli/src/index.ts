@@ -285,7 +285,7 @@ program.command("unlink")
   .action(() => {
     const here = process.cwd();
     const root = projectRoot(here);
-    if (!root || !linkedWorkspace(here)) throw new CliError("This folder isn't linked to a workspace");
+    if (!linkedWorkspace(here)) throw new CliError("This folder isn't linked to a workspace");
     // Only this folder changes. Opt it out when it inherits a parent's link (the parent and its other
     // folders stay linked) or removing its link would fall back to a parent's or CONTEXTER_WORKSPACE.
     const parent = dirname(here) !== here ? projectRoot(dirname(here)) : undefined;
