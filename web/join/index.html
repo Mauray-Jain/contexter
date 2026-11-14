@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Join your team · contexter</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500..800&family=Hanken+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="../style.css">
+  <script>try{var t=localStorage.getItem("contexter-theme");if(t)document.documentElement.setAttribute("data-theme",t)}catch(e){}</script>
+  <script src="../config.js"></script>
+</head>
+<body>
+<div id="main"><p class="muted" style="padding:24px">Loading…</p></div>
+<script type="module">
+  // Where an emailed invitation lands: sign in, apply the invitation, then walk through
+  // connecting Claude. The invitation is matched to the verified email, never to a code.
+  import { avatar, brand, cfg, command, dropdown, el, emptyMark, icon, requireSignIn, sb, signOut, toggleTheme, weave } from "../app.js";
+
+  const main = document.getElementById("main");
+
+  // An emailed link carries its own session in the URL. It must win over whoever is already
+  // signed in on this browser, or the invitation would be checked against the wrong account.
+  const fromLink = new URLSearchParams(location.hash.slice(1));
+  if (fromLink.get("access_token") && fromLink.get("refresh_token")) {
+    const { error: linkError } = await sb.auth.setSession({
+      access_token: fromLink.get("access_token"), refresh_token: fromLink.get("refresh_token"),
+    });
+    history.replaceState(null, "", location.pathname + location.search); // keep tokens out of the address bar and history
+    if (linkError) main.replaceChildren(el("p", { class: "status-err", role: "alert", style: "padding:24px" }, `This link didn't work: ${linkError.message}. Ask for a new invitation.`));
+  }
+
+  const user = await requireSignIn(main, {
+    title: "Accept your invitation",
+    note: "Sign in with the email address your invitation was sent to.",
+  });
+
+  main.replaceChildren(el("p", { class: "muted", role: "status", style: "padding:24px" }, "Applying your invitations…"));
+  const { data: accepted, error } = await sb.rpc("accept_pending_invites");
+  if (error) {
+    main.replaceChildren(el("section", { class: "card narrow" }, el("h1", {}, "Something went wrong"),
+      el("p", { class: "status-err" }, error.message), el("button", { type: "button", onclick: signOut }, "Sign out")));
+    throw error;
+  }
+
+  const { data: mine } = await sb.from("members").select("handle, role, workspaces(id, slug, name, team_id)").eq("user_id", user.id);
+  const projects = (mine ?? []).filter((m) => m.workspaces).map((m) => ({ ...m.workspaces, handle: m.handle, role: m.role }));
+  const justJoined = new Set((accepted ?? []).flatMap((a) => a.workspaces));
+  const { data: inTeams } = await sb.from("team_members").select("teams(name)").eq("user_id", user.id);
+
+  const top = el("header", { class: "join-top" },
+    brand(), el("span", { class: "spacer" }), el("span", { class: "muted" }, user.email),
+    el("button", { type: "button", class: "btn-ghost btn-sm", "aria-label": "Switch between light and dark", onclick: toggleTheme }, icon("moon")),
+    el("button", { type: "button", class: "btn-ghost btn-sm", onclick: signOut }, "Sign out"));
+  const page = (...kids) => main.replaceChildren(el("div", { class: "join" }, top, ...kids));
+
+  // Joined a team but not given a project yet (a team-only invitation): that is success, not an error.
+  if (!projects.length && (accepted ?? []).length + (inTeams ?? []).length) {
+    const names = [...new Set([...(accepted ?? []).map((a) => a.name ?? a.team), ...(inTeams ?? []).map((t) => t.teams?.name).filter(Boolean)])];
+    page(el("section", { class: "card pass" }, avatar(user.email, "lg"), el("div", {},
+        el("h1", {}, `You're in, welcome to ${names.join(", ")}`),
+        el("p", { class: "muted", style: "margin:4px 0 0" }, "No project access yet. A team admin will add you, and this page will then show how to connect your Claude."))),
+      el("p", { style: "margin-top:16px" }, el("a", { href: "../team/" }, "Open the team page")));
+    throw new Error("no projects yet");
+  }
+  if (!projects.length) {
+    page(el("section", { class: "card" }, el("div", { class: "empty" }, emptyMark("mail"),
+      el("h3", {}, "No invitation found"),
+      el("p", {}, `There's no pending invitation for ${user.email}. Ask a team admin to invite this exact address, or sign out and use the address they invited.`),
+      el("p", { class: "muted" }, "Have an invite code instead? Run ", el("code", {}, "contexter join <code> --handle <name>"), "."))));
+    throw new Error("no projects");
+  }
+
+  const me = (projects[0]?.handle ?? user.email.split("@")[0]);
+  const { data: mates } = await sb.from("members").select("handle, user_id").in("workspace_id", projects.map((p) => p.id));
+  const teammates = [...new Set((mates ?? []).filter((m) => m.user_id !== user.id).map((m) => m.handle))];
+
+  // Which project to connect first: one just granted, else the first.
+  let chosen = projects.find((p) => justJoined.has(p.slug)) ?? projects[0];
+  const joinedTeams = [...new Set((accepted ?? []).map((a) => a.name ?? a.team))];
+  const stepsHost = el("div");
+  const bar = el("i");
+  const progressLabel = el("span", { class: "muted num" });
+  let poll;
+
+  const picker = projects.length > 1
+    ? el("div", { class: "field-block", style: "margin:0" }, el("div", { class: "field-label" }, "Project to connect"),
+        dropdown({ label: "Project to connect", value: chosen.slug, options: projects.map((p) => ({ value: p.slug, label: p.name })),
+          onChange: (v) => { chosen = projects.find((p) => p.slug === v); renderSteps(); } }))
+    : null;
+
+  function renderSteps() {
+    clearInterval(poll);
+    const done = new Set();
+    const total = 4;
+    const update = () => { bar.style.width = `${(done.size / total) * 100}%`; progressLabel.textContent = `${done.size} of ${total} done`; };
+    const live = el("p", { class: "muted", role: "status", "aria-live": "polite" }, "Waiting for your first Claude session in this project…");
+    const mark = (n) => el("button", { type: "button", class: "btn-sm", onclick: (e) => {
+      const li = e.target.closest("li");
+      if (done.has(n)) { done.delete(n); li.classList.remove("done"); e.target.textContent = "Mark done"; }
+      else { done.add(n); li.classList.add("done"); e.target.textContent = "Done"; }
+      update();
+    } }, "Mark done");
+    const steps = el("ol", { class: "steps" },
+      el("li", {}, el("div", {}, el("h3", {}, "Install the command-line tool"),
+        el("p", {}, "You'll need Node 20 or newer. Run these two commands once."),
+        command("git clone https://github.com/Mauray-Jain/contexter && cd contexter && npm install && npm run build"),
+        command(`node packages/cli/dist/contexter.mjs setup --url ${cfg.url} --key ${cfg.key}`),
+        el("p", { style: "margin-bottom:10px" }, "Then add a short alias so the rest reads as ", el("code", {}, "contexter"), ":"),
+        command('alias contexter="node $PWD/packages/cli/dist/contexter.mjs"'), mark(1))),
+      el("li", {}, el("div", {}, el("h3", {}, "Sign in on this machine"),
+        el("p", {}, "Use the same email this invitation went to."), command("contexter login"), mark(2))),
+      el("li", {}, el("div", {}, el("h3", {}, `Connect Claude to ${chosen.name}`),
+        el("p", {}, "From your project folder, for Claude Code or the desktop Code tab:"),
+        command(`contexter install code --workspace ${chosen.slug}`),
+        el("p", { style: "margin:8px 0 10px" }, "Or for Claude chat on web, desktop or mobile, add this as a custom connector, then upload the skill:"),
+        command(`${cfg.url}/functions/v1/mcp`), command("contexter install chat"), mark(3))),
+      el("li", {}, el("div", {}, el("h3", {}, "Say hello to your team's Claude"),
+        el("p", {}, "Open Claude and send any message. This page notices when your first session reaches the team."), live)));
+    stepsHost.replaceChildren(steps);
+    update();
+
+    const since = new Date().toISOString();
+    poll = setInterval(async () => {
+      const { data } = await sb.from("sessions").select("id").eq("workspace_id", chosen.id).eq("user_id", user.id).gt("started_at", since).limit(1);
+      if (data?.length) {
+        clearInterval(poll);
+        [1, 2, 3, 4].forEach((n) => done.add(n));
+        steps.querySelectorAll("li").forEach((li) => li.classList.add("done"));
+        live.className = "status-ok";
+        live.replaceChildren(el("span", { class: "connected-ring" }, icon("check")), " Connected. Your Claude is now in the team's shared workspace.");
+        update();
+      }
+    }, 4000);
+  }
+  renderSteps();
+
+  page(
+    el("section", { class: "hero" },
+      weave([...teammates.slice(0, 3), me].sort((x, y) => (x === me) - (y === me)), { you: me }),
+      el("h1", { class: "enter", style: "--i:0" }, joinedTeams.length ? `You're in, ${me}. Welcome to ${joinedTeams.join(" and ")}.` : `You're all set, ${me}.`),
+      el("p", { class: "enter", style: "--i:1" }, joinedTeams.length
+        ? `You can open ${projects.length === 1 ? projects[0].name : `${projects.length} projects`}. Connect your Claude in four short steps and it joins the team's conversation.`
+        : "Connect your Claude in four short steps and it joins the team's conversation.")),
+    el("section", { class: "card enter", style: "margin-top:8px;--i:2" },
+      el("div", { class: "card-head" }, el("h2", {}, "Connect your Claude"), progressLabel),
+      el("div", { style: "padding:0 16px" }, el("div", { class: "progress", "aria-hidden": "true" }, bar)),
+      el("div", { class: "card-body", style: "padding-bottom:4px" }, picker),
+      stepsHost),
+    el("p", { class: "muted", style: "margin-top:16px;display:flex;gap:16px;flex-wrap:wrap" },
+      el("a", { href: `../?w=${chosen.slug}` }, "Open the live feed"), el("a", { href: "../team/" }, "Team page")));
+</script>
+</body>
+</html>

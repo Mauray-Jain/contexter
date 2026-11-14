@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Team · contexter</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500..800&family=Hanken+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="../style.css">
+  <script>try{var t=localStorage.getItem("contexter-theme");if(t)document.documentElement.setAttribute("data-theme",t)}catch(e){}</script>
+  <script src="../config.js"></script>
+</head>
+<body>
+<div id="main"><p class="muted" style="padding:24px">Loading…</p></div>
+<script type="module">
+  // Team management: people, projects, invitations and defaults. Everything goes through the
+  // database functions, so the page can only do what the signed-in person is allowed to do.
+  import { PRODUCT, appShell, avatar, callFunction, command, dropdown, el, emailTokens, emptyMark, icon, inlineConfirm, requireSignIn, sb, setCommands, transition } from "../app.js";
+
+  const TEMPLATE_LABELS = { blank: "Blank", "research-paper": "Research paper", software: "Software", book: "Book", spec: "Spec", "knowledge-base": "Knowledge base" };
+
+  const main = document.getElementById("main");
+  const user = await requireSignIn(main, { title: "Sign in to manage your team" });
+  const shell = appShell(main, user, "people");
+  const { data: tplRows } = await sb.from("templates").select("name, description").order("position");
+  const templates = (tplRows ?? []).map((t) => ({ ...t, label: TEMPLATE_LABELS[t.name] ?? t.name }));
+
+  const slugify = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48);
+  const flash = el("p", { role: "status", "aria-live": "polite", class: "muted", style: "margin:0 0 12px", hidden: true });
+  const say = (msg, bad = false) => { flash.hidden = false; flash.textContent = msg; flash.className = bad ? "status-err" : "status-ok"; };
+  const run = async (fn) => { try { await fn(); } catch (e) { say(e.message ?? String(e), true); return false; } return true; };
+  const rpc = async (name, args) => {
+    const { data, error } = await sb.rpc(name, args);
+    if (error) throw new Error(error.message);
+    return data;
+  };
+
+  let teams = [];
+  let team = null;
+  let myRole = "member";
+  let invitePanel = false;
+  const SECTIONS = {
+    people: ["People", (t) => `Everyone in ${t} and the projects each person can open.`],
+    projects: ["Projects", (t) => `Shared workspaces in ${t}. Each one keeps its own feed, content and decisions.`],
+    invitations: ["Invitations", (t) => `People invited to ${t} who have not accepted yet.`],
+    settings: ["Team settings", (t) => `Defaults for new members of ${t}, and your other teams.`],
+  };
+  const section = () => (location.hash.slice(1) in SECTIONS ? location.hash.slice(1) : "people");
+
+  async function loadTeams() {
+    const [{ data: ts }, { data: mine }] = await Promise.all([
+      sb.from("teams").select("*").order("name"),
+      sb.from("team_members").select("team_id, role").eq("user_id", user.id),
+    ]);
+    teams = (ts ?? []).map((t) => ({ ...t, myRole: (mine ?? []).find((m) => m.team_id === t.id)?.role ?? "member" }));
+    const want = new URLSearchParams(location.search).get("t");
+    team = teams.find((t) => t.slug === want) ?? teams.find((t) => t.id === team?.id) ?? teams[0] ?? null;
+    myRole = team?.myRole ?? "member";
+  }
+
+  const teamPicker = () => teams.length > 1
+    ? dropdown({ label: "Team", value: team?.slug, options: teams.map((t) => ({ value: t.slug, label: t.name })),
+        onChange: (v) => { history.replaceState(null, "", `?t=${v}${location.hash}`); loadTeams().then(render); } })
+    : null;
+
+  const cap = (r) => r.charAt(0).toUpperCase() + r.slice(1);
+  const roleBadge = (r) => el("span", { class: `pill ${r === "owner" ? "accent" : ""}` }, cap(r));
+
+  // ───────── create a team ─────────
+  function createTeamForm(first) {
+    const name = el("input", { required: true, placeholder: "Acme Research Lab", "aria-label": "Team name", maxlength: 200 });
+    const slug = el("input", { required: true, placeholder: "acme-lab", "aria-label": "Short name", pattern: "[a-z0-9][a-z0-9\\-]{1,48}" });
+    let edited = false;
+    slug.addEventListener("input", () => (edited = true));
+    name.addEventListener("input", () => { if (!edited) slug.value = slugify(name.value); });
+    return el("form", { onsubmit: async (e) => {
+      e.preventDefault();
+      if (await run(() => rpc("create_team", { p_slug: slug.value.trim(), p_name: name.value.trim() }))) {
+        history.replaceState(null, "", `?t=${slug.value.trim()}#people`);
+        await loadTeams(); render(); say("Team created. Invite your first teammates.");
+      }
+    } },
+      el("label", { class: "field" }, "Team name", name),
+      el("label", { class: "field" }, "Short name", el("span", { class: "hint" }, "Lowercase letters, numbers and dashes. Used in links and commands."), slug),
+      el("button", { type: "submit", class: "primary" }, first ? "Create team" : "Create another team"));
+  }
+
+  // ───────── people ─────────
+  function peopleTable(ov) {
+    const projectName = new Map(ov.projects.map((p) => [p.id, p]));
+    const isOwner = myRole === "owner";
+    const rows = ov.roster.map((p) => {
+      const me = p.user_id === user.id;
+      const roleCell = isOwner && !me
+        ? dropdown({ variant: "pill", label: `Team role for ${p.email}`, value: p.role,
+            options: [{ value: "owner", label: "Owner" }, { value: "admin", label: "Admin" }, { value: "member", label: "Member" }],
+            onChange: async (v) => { if (await run(() => rpc("set_team_member_role", { p_team: team.id, p_user: p.user_id, p_role: v }))) say("Role updated."); else render(); } })
+        : roleBadge(p.role);
+      const have = new Set(p.projects.map((x) => x.workspace_id));
+      const chips = p.projects.map((x) => {
+        const pname = projectName.get(x.workspace_id)?.name ?? "project";
+        return el("span", { class: "chip" }, pname,
+          x.role === "owner" ? el("span", { class: "chip-role" }, "Owner") : dropdown({ variant: "chip", label: `${p.email} on ${pname}`, value: x.role,
+            options: [{ value: "editor", label: "Editor", hint: "can write" }, { value: "viewer", label: "Viewer", hint: "read only" }],
+            onChange: async (v) => { if (await run(() => rpc("grant_project_access", { p_workspace: x.workspace_id, p_user: p.user_id, p_role: v }))) say("Access updated."); else render(); } }),
+          x.role === "owner" ? null : el("button", { type: "button", class: "btn-ghost x", "aria-label": `Remove ${p.email} from ${pname}`, title: "Remove access", onclick: async () => {
+            if (await run(() => rpc("revoke_project_access", { p_workspace: x.workspace_id, p_user: p.user_id }))) { say("Access removed."); render(); } } }, icon("x")));
+      });
+      const addable = ov.projects.filter((pr) => !have.has(pr.id));
+      const add = addable.length ? dropdown({ variant: "quiet", label: `Add ${p.email} to a project`, placeholder: "Add to project",
+          options: addable.map((pr) => ({ value: pr.id, label: pr.name, hint: "as Editor" })),
+          onChange: async (v) => { if (await run(() => rpc("grant_project_access", { p_workspace: v, p_user: p.user_id, p_role: "editor" }))) { say("Access added."); render(); } } }) : null;
+      const canRemove = me || myRole === "owner" || (myRole === "admin" && p.role === "member");
+      return el("tr", {},
+        el("td", {}, el("div", { class: "cell-person" }, avatar(p.email), el("div", {}, el("b", {}, p.email), me ? el("span", {}, "You") : null))),
+        el("td", {}, roleCell),
+        el("td", {}, el("div", { class: "chips" }, chips, add)),
+        el("td", {}, canRemove ? el("div", { class: "actions" }, inlineConfirm({
+          label: me ? "Leave" : "Remove",
+          prompt: me ? "Leave this team?" : "Remove from the team?",
+          confirmLabel: me ? "Leave team" : "Remove",
+          busyLabel: me ? "Leaving…" : "Removing…",
+          action: () => rpc("remove_team_member", { p_team: team.id, p_user: p.user_id }),
+          onDone: async () => { say(me ? "You left the team." : `${p.email} was removed.`); await loadTeams(); render(); } })) : null));
+    });
+    return el("section", { class: "card" }, el("div", { class: "table-wrap" }, el("table", {},
+      el("thead", {}, el("tr", {}, ["Person", "Team role", "Project access", ""].map((h) => el("th", {}, h)))), el("tbody", {}, rows))));
+  }
+
+  // ───────── invite ─────────
+  function invitePanelCard(ov) {
+    const emails = emailTokens({ placeholder: "Type an email and press Enter" });
+    const role = dropdown({ label: "Team role for the invitees", value: "member",
+      options: [{ value: "member", label: "Member", hint: "uses the projects they're given" }, ...(myRole === "owner" ? [{ value: "admin", label: "Admin", hint: "can invite and manage access" }] : [])] });
+    const checks = ov.projects.map((p) => {
+      const box = el("input", { type: "checkbox", "aria-label": `Give access to ${p.name}`, checked: team.new_member_access === "all_projects" });
+      const level = dropdown({ variant: "pill", label: `Role on ${p.name}`, value: "editor", options: [{ value: "editor", label: "Editor" }, { value: "viewer", label: "Viewer" }] });
+      return { p, box, level, li: el("li", {}, box, el("span", {}, p.name), level) };
+    });
+    const result = el("ul", { class: "plain", style: "margin-top:12px" });
+    const send = el("button", { type: "submit", class: "primary" }, icon("send"), "Send invitations");
+    return el("section", { class: "card panel-open", style: "margin-bottom:16px" },
+      el("div", { class: "card-head" }, el("h2", {}, "Invite people"),
+        el("button", { type: "button", class: "btn-ghost btn-sm", "aria-label": "Close", onclick: () => { invitePanel = false; render(); } }, icon("x"))),
+      el("form", { class: "card-body", onsubmit: async (e) => {
+        e.preventDefault();
+        const list = emails.values();
+        const bad = emails.invalid();
+        if (bad.length) { say(`Fix or remove ${bad.join(", ")} before sending.`, true); return; }
+        if (!list.length) { say("Add at least one email address.", true); emails.focus(); return; }
+        send.disabled = true; send.textContent = "Sending…";
+        try {
+          const out = await callFunction("invite-members", { team: team.id, emails: list, team_role: role.value,
+            grants: checks.filter((c) => c.box.checked).map((c) => ({ workspace_id: c.p.id, role: c.level.value })) });
+          invitePanel = false;
+          await render();
+          const failed = out.invited.filter((i) => i.mail !== "sent");
+          say(failed.length
+            ? `${out.invited.length - failed.length} sent. ${failed.map((i) => i.email).join(", ")} couldn't be emailed, but can still accept by signing in.`
+            : `${out.invited.length} invitation${out.invited.length === 1 ? "" : "s"} sent.`, failed.length > 0);
+        } catch (err) { say(err.message, true); send.disabled = false; send.replaceChildren(icon("send"), "Send invitations"); }
+      } },
+        el("div", { class: "field-block" }, el("div", { class: "field-label" }, "Email addresses"), el("p", { class: "hint" }, "Press Enter after each address, or paste a list. Each person gets an email with a link."), emails.el),
+        el("div", { class: "field-block" }, el("div", { class: "field-label" }, "Team role"), role),
+        ov.projects.length
+          ? el("fieldset", {}, el("legend", {}, "Project access"), el("ul", { class: "checks" }, checks.map((c) => c.li)))
+          : el("p", { class: "callout" }, "This team has no projects yet, so invitees will only join the team. Add a project first to give access on invitation."),
+        el("div", { class: "actions" }, el("button", { type: "button", onclick: () => { invitePanel = false; render(); } }, "Cancel"), send)), result);
+  }
+
+  function pendingTable(invites, ov) {
+    const names = new Map(ov.projects.map((p) => [p.id, p.name]));
+    if (!invites.length) return el("section", { class: "card" }, el("div", { class: "empty" }, emptyMark("mail"),
+      el("h3", {}, "Nobody is waiting"), el("p", {}, "Invite teammates by email. They show up here until they accept."),
+      el("button", { type: "button", class: "primary", onclick: () => { invitePanel = true; location.hash = "people"; render(); } }, icon("plus"), "Invite people")));
+    return el("section", { class: "card" }, el("div", { class: "table-wrap" }, el("table", {},
+      el("thead", {}, el("tr", {}, ["Email", "Access", "Expires", ""].map((h) => el("th", {}, h)))),
+      el("tbody", {}, invites.map((i) => el("tr", {},
+        el("td", {}, el("div", { class: "cell-person" }, avatar(i.email), el("div", {}, el("b", {}, i.email), el("span", {}, cap(i.team_role))))),
+        el("td", {}, (i.grants ?? []).length
+          ? el("div", { class: "chips" }, i.grants.map((g) => el("span", { class: "chip" }, names.get(g.workspace_id) ?? "project", el("span", { class: "chip-role" }, cap(g.role)))))
+          : el("span", { class: "muted" }, "Team only")),
+        el("td", { class: "num muted" }, new Date(i.expires_at).toLocaleDateString()),
+        el("td", {}, el("div", { class: "actions" },
+          el("button", { type: "button", class: "btn-ghost btn-sm", onclick: async () => {
+            if (await run(async () => { await callFunction("invite-members", { team: team.id, emails: [i.email], team_role: i.team_role, grants: i.grants }); })) { say(`Invitation resent to ${i.email}.`); render(); } } }, icon("refresh"), "Resend"),
+          inlineConfirm({ label: "Revoke", prompt: "Revoke this invitation?", confirmLabel: "Revoke", busyLabel: "Revoking…",
+            action: () => rpc("revoke_invite", { p_invite: i.id }), onDone: () => { say(`The invitation to ${i.email} was revoked.`); render(); } })))))))));
+  }
+
+  // ───────── projects ─────────
+  function projectsView(ov) {
+    const emailOf = new Map(ov.roster.map((r) => [r.user_id, r.email]));
+    const ownerOf = (pid) => ov.roster.find((r) => r.projects.some((x) => x.workspace_id === pid && x.role === "owner"));
+
+    // Owner: a picker of team members; choosing someone asks to confirm in place.
+    const ownerCell = (p) => {
+      const cell = el("div", { class: "owner-cell" });
+      const owner = ownerOf(p.id);
+      const paint = () => cell.replaceChildren(dropdown({
+        variant: "pill", label: `Owner of ${p.name}`, value: owner?.user_id ?? null, placeholder: "No owner",
+        options: ov.roster.map((r) => ({ value: r.user_id, label: r.email === user.email ? `${r.email} (you)` : r.email })),
+        onChange: (uid) => {
+          if (uid === owner?.user_id) return;
+          cell.replaceChildren(inlineConfirm({
+            open: true, danger: false, prompt: `Make ${emailOf.get(uid)} the owner?`, confirmLabel: "Transfer", busyLabel: "Transferring…",
+            action: () => rpc("transfer_project_ownership", { p_workspace: p.id, p_user: uid }),
+            onCancel: paint,
+            onDone: () => { say(`${emailOf.get(uid)} now owns ${p.name}.`); render(); },
+          }));
+        },
+      }));
+      paint();
+      return cell;
+    };
+
+    const list = ov.projects.length
+      ? el("section", { class: "card" }, el("div", { class: "table-wrap" }, el("table", {},
+          el("thead", {}, el("tr", {}, ["Project", "Owner", "Template", "People", ""].map((h) => el("th", {}, h)))),
+          el("tbody", {}, ov.projects.map((p) => el("tr", {},
+            el("td", {}, el("b", { style: "font-weight:600" }, p.name), el("div", { class: "muted", style: "font-size:.8125rem" }, p.slug)),
+            el("td", {}, ownerCell(p)),
+            el("td", {}, el("span", { class: "pill" }, templateName(p.template))), el("td", { class: "num" }, String(p.members)),
+            el("td", {}, el("div", { class: "actions" }, el("a", { class: "btn btn-sm", href: `../?w=${p.slug}` }, "Open feed")))))))))
+      : null;
+    return el("div", { class: "stack" }, newProjectCard(!ov.projects.length), list);
+  }
+
+  // New project: name, short name (derived until edited), template with its description.
+  const templateName = (t) => (templates.find((x) => x.name === t)?.label ?? t);
+  function newProjectCard(first) {
+    const name = el("input", { required: true, placeholder: "Retrieval paper", "aria-label": "Project name", maxlength: 200 });
+    const slug = el("input", { required: true, placeholder: "retrieval-paper", "aria-label": "Short name", pattern: "[a-z0-9][a-z0-9\\-]{1,48}" });
+    let edited = false;
+    slug.addEventListener("input", () => (edited = true));
+    name.addEventListener("input", () => { if (!edited) slug.value = slugify(name.value); });
+    const tpl = dropdown({ label: "Template", value: "research-paper",
+      options: templates.map((t) => ({ value: t.name, label: t.label, hint: t.description })) });
+    const create = el("button", { type: "submit", class: "primary" }, icon("plus"), "Create project");
+    return el("section", { class: "card" },
+      el("div", { class: "card-head" }, el("h2", {}, first ? "Create your first project" : "New project")),
+      el("form", { class: "card-body new-project", onsubmit: async (e) => {
+        e.preventDefault();
+        create.disabled = true;
+        const ok = await run(() => rpc("create_team_project", { p_team: team.id, p_slug: slug.value.trim(), p_name: name.value.trim(), p_template: tpl.value }));
+        create.disabled = false;
+        if (ok) { say(`${name.value.trim()} is ready. ${team.new_member_access === "all_projects" ? "Everyone on the team can open it." : "Add people to it from the People page."}`); render(); }
+      } },
+        el("div", { class: "grid-3" },
+          el("label", { class: "field" }, "Project name", name),
+          el("label", { class: "field" }, "Short name", slug),
+          el("div", { class: "field-block" }, el("div", { class: "field-label" }, "Template"), tpl)),
+        el("div", { class: "form-foot" },
+          el("p", { class: "muted", style: "margin:0" }, "You'll own it. Units from the template are created for you."), create),
+        el("details", { class: "cli-alt" }, el("summary", {}, "Prefer the terminal?"),
+          command(`contexter init <short-name> --handle <your-name> --team ${team.slug} --template research-paper`))));
+  }
+
+  // ───────── settings ─────────
+  function settingsView() {
+    const all = el("input", { type: "checkbox", id: "all-projects", checked: team.new_member_access === "all_projects", onchange: async (e) => {
+      const next = e.target.checked ? "all_projects" : "none";
+      const { error } = await sb.from("teams").update({ new_member_access: next }).eq("id", team.id);
+      if (error) { e.target.checked = !e.target.checked; say(error.message, true); return; }
+      team.new_member_access = next; say("Default saved.");
+    } });
+    return el("div", { class: "stack", style: "max-width:640px" },
+      el("section", { class: "card" }, el("div", { class: "card-head" }, el("h2", {}, "New member access")),
+        el("div", { class: "card-body" },
+          el("label", { for: "all-projects", style: "display:flex;gap:10px;align-items:center;font-weight:500;margin-bottom:6px" }, all, "Give new members editor access to every project"),
+          el("p", { class: "muted", style: "margin:0 0 0 26px" }, "Applies to people who accept from now on. Existing members keep what they have.")),),
+      el("section", { class: "card" }, el("div", { class: "card-head" }, el("h2", {}, "Create another team")), el("div", { class: "card-body" }, createTeamForm(false))));
+  }
+
+  // ───────── render ─────────
+  async function render() {
+    const sec = section();
+    shell.setActive(sec);
+    if (!team) {
+      shell.setHeader({ title: "Create your team", subtitle: "A team holds your projects and people." });
+      shell.content.replaceChildren(el("section", { class: "card", style: "max-width:480px" }, el("div", { class: "card-body" },
+        el("p", { class: "muted" }, "Invite teammates by email and choose which projects each person can open. You can add projects and change access any time."),
+        createTeamForm(true))), flash);
+      return;
+    }
+    const [title, sub] = SECTIONS[sec];
+    setCommands([
+      { label: "Invite people", icon: "plus", hint: "I", run: () => { invitePanel = true; if (section() !== "people") location.hash = "people"; else render(); } },
+      ...teams.filter((t) => t.id !== team.id).map((t) => ({ label: `Switch to team ${t.name}`, icon: "people", run: () => { history.replaceState(null, "", `?t=${t.slug}${location.hash}`); loadTeams().then(render); } })),
+    ]);
+    if (myRole === "member") return renderMember();
+    const overview = await rpc("team_overview", { p_team: team.id });
+    const { data: invites } = await sb.from("email_invites").select("*").eq("team_id", team.id).eq("status", "pending").order("created_at", { ascending: false });
+    const inviteBtn = el("button", { type: "button", class: "primary", onclick: () => { invitePanel = true; if (section() !== "people") location.hash = "people"; else render(); } }, icon("plus"), "Invite people");
+    shell.setHeader({ title, subtitle: sub(team.name), actions: [teamPicker(), sec === "people" || sec === "invitations" ? inviteBtn : null] });
+    let body;
+    if (sec === "people") body = el("div", {}, invitePanel ? invitePanelCard(overview) : null,
+      overview.roster.length ? peopleTable(overview) : null);
+    else if (sec === "invitations") body = pendingTable(invites ?? [], overview);
+    else if (sec === "projects") body = projectsView(overview);
+    else body = settingsView();
+    shell.content.replaceChildren(flash, body);
+  }
+
+  async function renderMember() {
+    shell.setHeader({ title: "Your projects", subtitle: `The projects you can open in ${team.name}.`, actions: [teamPicker()] });
+    const { data } = await sb.from("members").select("role, workspaces(slug, name, team_id)").eq("user_id", user.id);
+    const mine = (data ?? []).filter((m) => m.workspaces?.team_id === team.id);
+    shell.content.replaceChildren(flash, mine.length
+      ? el("section", { class: "card" }, el("ul", { class: "plain" }, mine.map((m) => el("li", {},
+          el("a", { href: `../?w=${m.workspaces.slug}`, style: "flex:1;font-weight:500" }, m.workspaces.name), el("span", { class: "badge" }, m.role)))))
+      : el("section", { class: "card" }, el("div", { class: "empty" }, emptyMark("folder"), el("h3", {}, "No projects yet"),
+          el("p", {}, "You haven't been given access to a project. Ask a team admin to add you."))),
+      el("p", { class: "muted", style: "margin-top:12px" }, `Only ${PRODUCT} team admins can invite people or change access.`));
+  }
+
+  window.addEventListener("hashchange", () => transition(() => { render(); }));
+  await loadTeams();
+  await render();
+</script>
+</body>
+</html>

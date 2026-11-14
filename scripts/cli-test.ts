@@ -254,6 +254,58 @@ await step("Modal: a watcher without the job's profile says so instead of going 
   await until("the watcher to stop", async () => !existsSync(join(root, "writer", ".home", "modal-daemon.pid")));
 });
 
+// ── teams from the CLI: two people, separate homes, through the real built CLI
+const leadEmail = `lead-${run}@cli.local`, mateEmail = `mate-${run}@cli.local`;
+await login("lead", leadEmail);
+const teamSlug = `team-${run}`, projSlug = `tp-${run}`;
+
+await step("team: create a team, then a project in it from a template", () => {
+  assert.match(cli("lead", ["team", "create", teamSlug, "--name", "CLI Team"]), /You're its owner/);
+  assert.match(cli("lead", ["init", projSlug, "--team", teamSlug, "--template", "spec"]), /from template spec .* in team/);
+  assert.match(cli("lead", ["team", "list"]), new RegExp(`${teamSlug}\\s+CLI Team\\s+owner`));
+  assert.match(cli("lead", ["status"]), /requirements\/goals/);
+});
+
+await step("team: invite by email to the active project's team", () => {
+  const out = cli("lead", ["invite", mateEmail]);
+  assert.match(out, new RegExp(`Invited to CLI Team \\(${projSlug} as editor\\)`));
+  assert.match(out, /email sent/);
+  assert.match(cli("lead", ["team", "invites"]), new RegExp(mateEmail));
+  assert.throws(() => cli("lead", ["invite", "not-an-email"]), /Not email addresses/);
+});
+
+// The invitee has no account yet; they sign up with an email code, then accept.
+await login("mate", mateEmail);
+
+await step("team: join with no code accepts the invitation and activates the project", () => {
+  assert.match(cli("mate", ["join"]), new RegExp(`Joined CLI Team with access to ${projSlug}`));
+  assert.match(cli("mate", ["whoami"]), new RegExp(`workspace: ${projSlug}`));
+  assert.match(cli("mate", ["join"]), /No pending invitations/);
+});
+
+await step("team: show lists people and their access; plain members see only their own", () => {
+  const out = cli("lead", ["team", "show", teamSlug]);
+  assert.match(out, new RegExp(`${mateEmail}\\s+member\\s+${projSlug}:editor`));
+  assert.match(cli("mate", ["team"]), /Only team admins can see everyone/);
+});
+
+await step("team: roles, ownership transfer, and nobody leaves owning a project", () => {
+  assert.match(cli("lead", ["team", "role", mateEmail, "admin", "--team", teamSlug]), /now an admin/);
+  assert.match(cli("lead", ["transfer", mateEmail]), new RegExp(`now owns ${projSlug}`));
+  assert.throws(() => cli("lead", ["team", "remove", mateEmail]), /transfer ownership first/);
+  assert.match(cli("mate", ["transfer", leadEmail]), /now owns/);
+  assert.match(cli("lead", ["team", "remove", mateEmail]), /Removed/);
+});
+
+await step("team: revoke an invitation and set the team default", () => {
+  const extra = `extra-${run}@cli.local`;
+  cli("lead", ["invite", extra, "--project", projSlug, "--role", "viewer"]);
+  assert.match(cli("lead", ["team", "invites"]), new RegExp(`${extra}.*${projSlug}:viewer`));
+  assert.match(cli("lead", ["team", "revoke", extra]), /Revoked/);
+  assert.match(cli("lead", ["team", "invites"]), /Nobody is waiting/);
+  assert.match(cli("lead", ["team", "default", "all"]), /every project as editors/);
+});
+
 await step("chat skill packages as a zip", () => {
   const zip = join(root, "skill.zip");
   const out = cli("writer", ["install", "chat", "-o", zip]);

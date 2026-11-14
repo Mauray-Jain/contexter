@@ -161,7 +161,7 @@ site_url = "http://127.0.0.1:3000"
 # The public URL that Auth serves on. Defaults to the API external URL with `/auth/v1` appended.
 # external_url = ""
 # A list of *exact* URLs that auth providers are permitted to redirect to post authentication.
-additional_redirect_urls = ["https://127.0.0.1:3000", "http://127.0.0.1:54545/callback"]
+additional_redirect_urls = ["https://127.0.0.1:3000", "http://127.0.0.1:54545/callback", "http://127.0.0.1:3000/join"]
 # How long tokens are valid for, in seconds. Defaults to 3600 (1 hour), maximum 604,800 (1 week).
 jwt_expiry = 3600
 # JWT issuer URL. If not set, defaults to auth.external_url.
@@ -246,9 +246,9 @@ otp_expiry = 3600
 # sender_name = "Admin"
 
 # Uncomment to customize email template
-# [auth.email.template.invite]
-# subject = "You have been invited"
-# content_path = "./supabase/templates/invite.html"
+[auth.email.template.invite]
+subject = "You have been invited to a contexter team"
+content_path = "./supabase/templates/invite.html"
 
 [auth.email.template.magic_link]
 subject = "Your contexter sign-in code"
@@ -426,4 +426,8 @@ enabled = true
 
 # The MCP server verifies user tokens itself (and must answer unauthenticated OAuth discovery).
 [functions.mcp]
+verify_jwt = false
+
+# Checks the caller's token itself and acts as them (team admins only, enforced in the database).
+[functions.invite-members]
 verify_jwt = false
