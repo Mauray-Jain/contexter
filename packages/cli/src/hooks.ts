@@ -185,20 +185,24 @@ async function context(input: HookInput, opts: { create: boolean }) {
   const workspace = linkedWorkspace(input.cwd ?? process.cwd());
   let state = readState(input.session_id);
   if (state && state.workspace !== workspace) {
+    // Tell Claude first: the notice must not depend on reaching the server.
+    noteAttachment(input.session_id, state.workspace, workspace);
     const sb = getClient();
     await requireUser(sb);
-    // Keep the state when the close fails, so a later hook retries it (and releases its locks).
+    // Keep the state when the close fails, so a later hook retries it (and releases its locks); this
+    // hook stays detached meanwhile, so nothing more is shared with either workspace.
     const { error } = await sb.rpc("end_session", { p_session: state.session });
-    if (error) throw new Error(`closing the session of ${state.workspace}: ${error.message}`);
+    if (error) {
+      appendFileSync(join(home, "hooks.log"), `${new Date().toISOString()} closing the session of ${state.workspace}: ${error.message}\n`);
+      return null;
+    }
     // Background runs keep their mappings (bgDir): their runs are closed by id, whatever the link.
     rmSync(statePath(input.session_id), { force: true });
-    noteAttachment(input.session_id, state.workspace, workspace);
     state = null;
   }
   // A notice still waiting must name where the session is now, even if no session was created since.
-  if (!state && pendingMove(input.session_id) && pendingMove(input.session_id)!.to !== workspace) {
-    noteAttachment(input.session_id, undefined, workspace);
-  }
+  const pending = state ? undefined : pendingMove(input.session_id);
+  if (pending && pending.to !== workspace) noteAttachment(input.session_id, undefined, workspace);
   if (!workspace) return null;
   if (!state && !opts.create) return null;
   // A session that starts outside SessionStart (the folder was linked mid-session) must be told too.
