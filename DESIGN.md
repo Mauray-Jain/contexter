@@ -4,12 +4,13 @@ The familiar category standard, executed carefully: a calm, dense team-admin pro
 
 ## Foundations
 
-- **Surfaces:** cool neutrals tinted toward indigo (hue 275). Light and dark share hues; dark is not an inversion. App background, white/charcoal surface, a slightly different sidebar tone.
+- **Surfaces:** dark-first. Near-black neutrals tinted toward indigo (hue 275) with a soft indigo/violet atmosphere behind the work (two fixed radial glows); light mode is a secondary theme with the same hues. Hairline translucent borders, translucent blurred sidebar.
 - **Accent:** one indigo (`--accent`) for primary actions, selection, focus and the brand mark. Semantic green, amber and red appear only for state (`--ok`, `--warn`, `--danger`).
 - **Type:** Figtree for UI (400/500/600/700), JetBrains Mono for commands, refs and codes only. Base 14px, scale 12/13/14/16/24, headings -0.015em.
 - **Elevation:** declared once, as 1px borders. Shadows exist only on floating layers (`--shadow-float`, dialogs).
 - **Shape:** 12px cards, 7-10px controls, pills only for badges and chips.
-- **Motion:** 150-200ms ease-out on state changes; one authored moment (new feed rows settle in). All motion off under `prefers-reduced-motion`.
+- **Motion:** 150-250ms exponential ease-out. Cross-page view transitions with a sliding nav highlight, staggered feed rows on load, a glow sweep for new events, a pulsing Live pill, a drawn check when Claude connects. All motion off under `prefers-reduced-motion`.
+- **Signature:** the ⌘K command palette (also `/`), with single-key shortcuts T, I, G F, G P.
 
 ## Components
 

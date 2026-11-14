@@ -125,7 +125,7 @@
         [1, 2, 3, 4].forEach((n) => done.add(n));
         steps.querySelectorAll("li").forEach((li) => li.classList.add("done"));
         live.className = "status-ok";
-        live.textContent = "Connected. Your Claude is now in the team's shared workspace.";
+        live.replaceChildren(el("span", { class: "connected-ring" }, icon("check")), " Connected. Your Claude is now in the team's shared workspace.");
         update();
       }
     }, 4000);
@@ -133,11 +133,11 @@
   renderSteps();
 
   page(
-    el("section", { class: "card pass" }, avatar(user.email, "lg"), el("div", { style: "flex:1;min-width:0" },
-      el("h1", {}, joinedTeams.length ? `You're in. Welcome to ${joinedTeams.join(", ")}` : "You're all set up"),
-      el("p", { class: "muted", style: "margin:4px 0 0" }, joinedTeams.length
-        ? `You can open ${projects.length === 1 ? projects[0].name : `${projects.length} projects`}. Connect your Claude to start sharing context.`
-        : "Your projects are below. Connect your Claude to start sharing context."))),
+    el("section", { class: "hero" }, el("div", { class: "avatars" }, avatar(user.email)),
+      el("h1", {}, joinedTeams.length ? `You're in. Welcome to ${joinedTeams.join(", ")}.` : "You're all set up."),
+      el("p", {}, joinedTeams.length
+        ? `You can open ${projects.length === 1 ? projects[0].name : `${projects.length} projects`}. Four quick steps connect your Claude, and then everything your team does shows up in its context.`
+        : "Four quick steps connect your Claude to your team's shared workspace.")),
     el("section", { class: "card", style: "margin-top:16px" },
       el("div", { class: "card-head" }, el("h2", {}, "Connect your Claude"), progressLabel),
       el("div", { style: "padding:0 16px" }, el("div", { class: "progress", "aria-hidden": "true" }, bar)),

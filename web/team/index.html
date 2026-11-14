@@ -16,7 +16,7 @@
 <script type="module">
   // Team management: people, projects, invitations and defaults. Everything goes through the
   // database functions, so the page can only do what the signed-in person is allowed to do.
-  import { PRODUCT, appShell, avatar, callFunction, command, el, emptyMark, icon, requireSignIn, sb } from "../app.js";
+  import { PRODUCT, appShell, avatar, callFunction, command, el, emptyMark, icon, requireSignIn, sb, setCommands, transition } from "../app.js";
 
   const main = document.getElementById("main");
   const user = await requireSignIn(main, { title: "Sign in to manage your team" });
@@ -88,7 +88,7 @@
     const rows = ov.roster.map((p) => {
       const me = p.user_id === user.id;
       const roleCell = isOwner && !me
-        ? el("select", { "aria-label": `Team role for ${p.email}`, onchange: async (e) => {
+        ? el("select", { class: "role", "aria-label": `Team role for ${p.email}`, onchange: async (e) => {
             if (await run(() => rpc("set_team_member_role", { p_team: team.id, p_user: p.user_id, p_role: e.target.value }))) say("Role updated."); else render(); } },
             ["owner", "admin", "member"].map((r) => el("option", { value: r, selected: r === p.role }, r)))
         : roleBadge(p.role);
@@ -228,6 +228,10 @@
       return;
     }
     const [title, sub] = SECTIONS[sec];
+    setCommands([
+      { label: "Invite people", icon: "plus", hint: "I", run: () => { invitePanel = true; if (section() !== "people") location.hash = "people"; else render(); } },
+      ...teams.filter((t) => t.id !== team.id).map((t) => ({ label: `Switch to team ${t.name}`, icon: "people", run: () => { history.replaceState(null, "", `?t=${t.slug}${location.hash}`); loadTeams().then(render); } })),
+    ]);
     if (myRole === "member") return renderMember();
     const overview = await rpc("team_overview", { p_team: team.id });
     const { data: invites } = await sb.from("email_invites").select("*").eq("team_id", team.id).eq("status", "pending").order("created_at", { ascending: false });
@@ -254,7 +258,7 @@
       el("p", { class: "muted", style: "margin-top:12px" }, `Only ${PRODUCT} team admins can invite people or change access.`));
   }
 
-  window.addEventListener("hashchange", render);
+  window.addEventListener("hashchange", () => transition(() => { render(); }));
   await loadTeams();
   await render();
 </script>

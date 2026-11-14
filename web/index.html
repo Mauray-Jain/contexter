@@ -18,7 +18,7 @@
 <script type="module">
   // Live team feed: what teammates and their Claudes did, who is active, units and reasoning,
   // updated through Supabase Realtime.
-  import { ago, appShell, avatar, el, emptyMark, requireSignIn, sb } from "./app.js";
+  import { ago, appShell, avatar, el, emptyMark, requireSignIn, sb, setCommands, transition } from "./app.js";
 
   const main = document.getElementById("main");
   const user = await requireSignIn(main);
@@ -53,16 +53,16 @@
   const select = el("select", { "aria-label": "Project", onchange: (e) => {
     ws = memberships.find((m) => m.workspaces.slug === e.target.value).workspaces;
     history.replaceState(null, "", `?w=${ws.slug}`);
-    load();
+    transition(() => { load(); });
   } }, memberships.map((m) => el("option", { value: m.workspaces.slug, selected: m.workspaces.id === ws.id }, m.workspaces.name)));
 
   const section = (title, body, extra) => el("section", { class: "card" }, el("div", { class: "card-head" }, el("h2", {}, title), extra), body);
   shell.content.replaceChildren(el("div", { class: "layout-2" },
-    section("Team feed", feedList),
+    section("Team feed", feedList, el("span", { class: "live", title: "Updates arrive instantly" }, el("i"), "Live")),
     el("div", { class: "stack" },
       section("Active now", presence),
       section("Open questions", questions),
-      section("Units", el("div", { class: "table-wrap" }, el("table", {},
+      section("Units", el("div", { class: "table-wrap", id: "units-table" }, el("table", {},
         el("thead", {}, el("tr", {}, ["Unit", "Status", "Version", "Lock"].map((h) => el("th", {}, h)))), unitsBody), unitsEmpty)),
       section("Decisions", decisions),
       section("Team memory", memory))));
@@ -89,11 +89,11 @@
     }
   }
 
-  function feedItem(e, fresh = false) {
+  function feedItem(e, fresh = false, i = 0) {
     const mine = e.author_id === user.id;
     const name = mine ? "you" : handles.get(e.author_id) ?? "someone";
     const cls = [(e.mentions ?? []).includes(myHandle) ? "mention" : "", fresh ? "new" : ""].join(" ").trim();
-    return el("li", { class: cls || null }, avatar(mine ? user.email : name),
+    return el("li", { class: cls || null, style: fresh ? null : `--i:${Math.min(i, 8)}` }, avatar(mine ? user.email : name),
       el("div", { class: "body" }, el("span", { class: "who" }, name), " ", describe(e)),
       el("span", { class: "when", title: e.created_at }, ago(e.created_at)));
   }
@@ -121,6 +121,7 @@
     ]);
     const unitRows = units.data ?? [];
     unitsEmpty.hidden = unitRows.length > 0;
+    document.getElementById("units-table").hidden = unitRows.length === 0;
     unitsBody.replaceChildren(...unitRows.map((u) => el("tr", {},
       el("td", { class: "ref" }, el("button", { type: "button", onclick: () => openUnit(u) }, `${u.collection}/${u.key}`)),
       el("td", {}, el("span", { class: "badge" }, u.status)), el("td", { class: "num" }, `v${u.current_version}`),
@@ -131,7 +132,7 @@
     presence.replaceChildren(active.length
       ? el("div", { style: "display:grid;gap:10px" }, active.map((s) => {
           const name = s.user_id === user.id ? "you" : handles.get(s.user_id) ?? "someone";
-          return el("div", { class: "cell-person" }, avatar(s.user_id === user.id ? user.email : name),
+          return el("div", { class: "cell-person" }, el("span", { class: "avatar-live" }, avatar(s.user_id === user.id ? user.email : name)),
             el("div", {}, el("b", {}, name), el("span", {}, `${s.client}${s.title ? ` · ${s.title}` : ""} · ${ago(s.last_seen_at)}`)));
         }))
       : el("p", { class: "muted", style: "margin:0" }, "Nobody active in the last 15 minutes."));
@@ -151,7 +152,7 @@
     myHandle = handles.get(user.id) ?? "";
     const { data: events } = await sb.from("events").select("*").eq("workspace_id", ws.id)
       .neq("kind", "presence").order("id", { ascending: false }).limit(60);
-    feedList.replaceChildren(...(events ?? []).map((e) => feedItem(e)));
+    feedList.replaceChildren(...(events ?? []).map((e, i) => feedItem(e, false, i)));
     if (!events?.length) feedList.replaceChildren(el("li", {}, el("div", { class: "empty", style: "width:100%" }, emptyMark("feed"),
       el("h3", {}, "Nothing yet"), el("p", {}, "When a teammate or their Claude does something, it shows up here instantly."))));
     await refreshSide();
@@ -169,6 +170,8 @@
       .subscribe();
   }
 
+  setCommands(memberships.map((m) => ({ label: `Switch to ${m.workspaces.name}`, icon: "folder", run: () => {
+    select.value = m.workspaces.slug; select.dispatchEvent(new Event("change")); } })));
   setHeader("Loading…");
   await load();
   setInterval(refreshSide, 60_000); // keeps "x minutes ago" and presence honest

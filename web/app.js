@@ -39,6 +39,7 @@ const ICONS = {
   logout: '<path d="M9 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h3M16 8l4 4-4 4M20 12H9"/>',
   lock: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
   send: '<path d="M21 3 10 14M21 3l-7 18-4-7-7-4z"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
   refresh: '<path d="M20 11a8 8 0 0 0-14.5-4M4 4v4h4M4 13a8 8 0 0 0 14.5 4M20 20v-4h-4"/>',
 };
 export function icon(name) {
@@ -67,12 +68,13 @@ function applyTheme(mode) {
 }
 function currentTheme() {
   return document.documentElement.getAttribute("data-theme")
-    ?? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    ?? "dark";
 }
 export function toggleTheme() {
   const next = currentTheme() === "dark" ? "light" : "dark";
   applyTheme(next);
   try { localStorage.setItem("contexter-theme", next); } catch { /* private mode: the choice just won't persist */ }
+  document.dispatchEvent(new Event("contexter-theme"));
 }
 try { applyTheme(localStorage.getItem("contexter-theme")); } catch { /* ignore */ }
 
@@ -86,6 +88,78 @@ export function avatar(name, size = "") {
   const initials = ((parts[0]?.[0] ?? "?") + (parts[1]?.[0] ?? "")).toUpperCase();
   return el("span", { class: `avatar ${size}`.trim(), style: `--h:${HUES[h % HUES.length]}`, "aria-hidden": "true" }, initials);
 }
+
+// ───────── command palette (⌘K) ─────────
+let pageCommands = [];
+export const setCommands = (list) => { pageCommands = list; };
+export function transition(fn) {
+  if (document.startViewTransition && !matchMedia("(prefers-reduced-motion: reduce)").matches) document.startViewTransition(fn);
+  else fn();
+}
+let paletteEl;
+function baseCommands() {
+  const base = new URL("./", import.meta.url).pathname;
+  const go = (path) => () => { location.href = path; };
+  return [
+    { label: "Go to Feed", icon: "feed", hint: "G F", run: go(base) },
+    { label: "Go to People", icon: "people", hint: "G P", run: go(`${base}team/#people`) },
+    { label: "Go to Projects", icon: "folder", run: go(`${base}team/#projects`) },
+    { label: "Go to Invitations", icon: "mail", run: go(`${base}team/#invitations`) },
+    { label: "Go to Team settings", icon: "settings", run: go(`${base}team/#settings`) },
+    { label: "Toggle light / dark", icon: "moon", hint: "T", run: toggleTheme },
+    { label: "Sign out", icon: "logout", run: signOut },
+  ];
+}
+export function openPalette() {
+  if (!paletteEl) {
+    paletteEl = el("dialog", { class: "palette", "aria-label": "Command palette" });
+    document.body.append(paletteEl);
+  }
+  const all = [...pageCommands, ...baseCommands()];
+  let shown = all, sel = 0;
+  const list = el("ul", { role: "listbox" });
+  const input = el("input", { placeholder: "Type a command or search…", "aria-label": "Command", autocomplete: "off", spellcheck: "false" });
+  const paint = () => {
+    list.replaceChildren(...(shown.length ? shown.map((c, i) => el("li", { role: "option", "aria-selected": i === sel ? "true" : "false",
+      onmousemove: () => { if (sel !== i) { sel = i; mark(); } }, onclick: () => choose(c) }, icon(c.icon ?? "feed"), c.label, c.hint ? el("small", { class: "mono" }, c.hint) : null))
+      : [el("li", { class: "none" }, "No matching command")]));
+  };
+  const mark = () => [...list.children].forEach((li, i) => { li.setAttribute("aria-selected", String(i === sel)); if (i === sel) li.scrollIntoView({ block: "nearest" }); });
+  const choose = (c) => { paletteEl.close(); c.run(); };
+  input.addEventListener("input", () => {
+    const q = input.value.toLowerCase().split(/\s+/).filter(Boolean);
+    shown = all.filter((c) => q.every((t) => c.label.toLowerCase().includes(t)));
+    sel = 0; paint();
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); sel = Math.min(shown.length - 1, sel + 1); mark(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); sel = Math.max(0, sel - 1); mark(); }
+    else if (e.key === "Enter" && shown[sel]) { e.preventDefault(); choose(shown[sel]); }
+  });
+  paletteEl.replaceChildren(input, list, el("div", { class: "palette-foot" },
+    el("span", {}, el("span", { class: "kbd" }, "↑↓"), " move"), el("span", {}, el("span", { class: "kbd" }, "↵"), " select"), el("span", {}, el("span", { class: "kbd" }, "esc"), " close")));
+  paint();
+  paletteEl.addEventListener("click", (e) => { if (e.target === paletteEl) paletteEl.close(); });
+  if (!paletteEl.open) paletteEl.showModal();
+  input.focus();
+}
+addEventListener("keydown", (e) => {
+  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName ?? "");
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openPalette(); }
+  else if (e.key === "/" && !typing && !paletteEl?.open) { e.preventDefault(); openPalette(); }
+  else if (!typing && !paletteEl?.open && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    // Single-key shortcuts, the ones the palette advertises: T theme, I invite, G then F / P to jump.
+    const k = e.key.toLowerCase();
+    if (goPending) {
+      goPending = false;
+      const cmd = baseCommands().find((c) => c.hint === `G ${k.toUpperCase()}`);
+      if (cmd) { e.preventDefault(); cmd.run(); }
+    } else if (k === "g") { goPending = true; setTimeout(() => { goPending = false; }, 900); }
+    else if (k === "t") toggleTheme();
+    else if (k === "i") pageCommands.find((c) => c.hint === "I")?.run();
+  }
+});
+let goPending = false;
 
 // ───────── app shell ─────────
 // One shell for every signed-in page: sidebar navigation, theme toggle, who's signed in.
@@ -101,13 +175,15 @@ export function appShell(mount, user, active) {
   const links = new Map(items.map(([key, label, href, ic]) =>
     [key, el("a", { href, "aria-current": key === active ? "page" : null }, icon(ic), label)]));
   const themeBtn = el("button", { type: "button", class: "btn-ghost btn-sm", "aria-label": "Toggle light and dark theme", title: "Light / dark", onclick: () => {
-    toggleTheme(); themeBtn.replaceChildren(icon(currentTheme() === "dark" ? "sun" : "moon"));
+    toggleTheme();
   } }, icon(currentTheme() === "dark" ? "sun" : "moon"));
+  document.addEventListener("contexter-theme", () => themeBtn.replaceChildren(icon(currentTheme() === "dark" ? "sun" : "moon")));
   const head = el("div", { class: "page-head" });
   const content = el("div");
   mount.replaceChildren(el("div", { class: "app" },
     el("aside", { class: "sidebar" },
       el("a", { class: "brand", href: base }, el("span", { class: "brand-mark" }, icon("feed")), PRODUCT),
+      el("button", { type: "button", class: "jump", onclick: openPalette, "aria-label": "Open the command palette" }, icon("search"), el("span", {}, "Jump to…"), el("span", { class: "kbd" }, "⌘K")),
       el("nav", { class: "nav", "aria-label": "Main" }, [...links.values()]),
       el("span", { class: "spacer" }),
       themeBtn,
@@ -155,10 +231,24 @@ export async function requireSignIn(mount, { title = `Sign in to ${PRODUCT}`, no
     const github = el("button", { type: "button", class: "primary wide", style: "margin-bottom:12px", onclick: () =>
       sb.auth.signInWithOAuth({ provider: "github", options: { redirectTo: location.href } }) }, "Continue with GitHub");
 
-    mount.replaceChildren(el("section", { class: "card narrow" },
-      el("div", { class: "brand", style: "padding:0 0 18px" }, el("span", { class: "brand-mark" }, icon("feed")), PRODUCT),
-      el("h1", {}, title), note ? el("p", { class: "muted" }, note) : el("p", { class: "muted" }, "One shared workspace for your team's Claudes."),
-      github, el("div", { class: "divider" }, "or"), emailForm, codeForm, status));
+    const example = [
+      ["priya", "asked: “tighten the ablation paragraph in method”", "just now"],
+      ["priya", "→ their Claude: rewrote it, two sentences shorter", "just now"],
+      ["mehul", "edited sections/results (v4→v5)", "2m ago"],
+      ["jordan", "recorded D-0003: frame the result as a trade-off", "9m ago"],
+    ];
+    mount.replaceChildren(el("div", { class: "entry" },
+      el("div", {},
+        el("div", { class: "brand", style: "padding:0" }, el("span", { class: "brand-mark" }, icon("feed")), PRODUCT),
+        el("h1", {}, "Every Claude on your team, in sync."),
+        el("p", { class: "lede" }, "One shared workspace, a live feed of what everyone asked and changed, and the reasoning behind every decision."),
+        el("section", { class: "card example", "aria-label": "Example of the live feed" },
+          el("div", { class: "card-head" }, el("h2", {}, "Team feed"), el("span", { class: "live" }, el("i"), "Live")),
+          el("ul", {}, example.map(([who, what, when], i) => el("li", { style: `--i:${i}` }, avatar(who, "sm"), el("span", {}, el("b", {}, who), " ", what), el("span", { class: "when" }, when)))),
+          el("small", {}, "Example activity"))),
+      el("section", { class: "card signin" },
+        el("h2", {}, title), note ? el("p", { class: "muted" }, note) : el("p", { class: "muted" }, "Sign in to set up your team or join one."),
+        el("div", { style: "height:8px" }), github, el("div", { class: "divider" }, "or"), emailForm, codeForm, status)));
   });
 }
 
