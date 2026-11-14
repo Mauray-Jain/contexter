@@ -116,7 +116,8 @@ export function projectRoot(cwd: string): string | undefined {
 export function linkedWorkspace(cwd: string): string | undefined {
   const root = projectRoot(cwd);
   if (root) {
-    try { return JSON.parse(readFileSync(join(root, ".contexter.json"), "utf8")).workspace; } catch { return undefined; }
+    // { "workspace": null } opts a folder out, even inside a linked parent (see `contexter unlink`).
+    try { return JSON.parse(readFileSync(join(root, ".contexter.json"), "utf8")).workspace || undefined; } catch { return undefined; }
   }
   return process.env.CONTEXTER_WORKSPACE || undefined;
 }
@@ -150,7 +151,9 @@ async function context(input: HookInput, opts: { create: boolean }) {
   if (state && state.workspace !== workspace) {
     const sb = getClient();
     await requireUser(sb);
-    await sb.rpc("end_session", { p_session: state.session });
+    // Keep the state when the close fails, so a later hook retries it (and releases its locks).
+    const { error } = await sb.rpc("end_session", { p_session: state.session });
+    if (error) throw new Error(`closing the session of ${state.workspace}: ${error.message}`);
     rmSync(statePath(input.session_id), { force: true });
     rmSync(bgDir(input.session_id), { recursive: true, force: true });
     state = null;
@@ -161,7 +164,9 @@ async function context(input: HookInput, opts: { create: boolean }) {
   const user = await requireUser(sb);
   const ctx = await core.loadCtx(sb, user.id, state
     ? { workspace, session: state.session }
-    : { workspace, client: "claude-code", externalId: input.session_id, title: basename(input.cwd ?? "") });
+    // One contexter session per Claude Code session and workspace: ensure_session matches on the
+    // external id alone, so a session relinked to another workspace must not reopen its old row.
+    : { workspace, client: "claude-code", externalId: `${workspace}:${input.session_id}`, title: basename(input.cwd ?? "") });
   if (!state) writeState(input.session_id, { workspace: ctx.ws.slug, session: ctx.session! });
   return { ctx, state: readState(input.session_id)! };
 }

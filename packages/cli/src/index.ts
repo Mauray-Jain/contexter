@@ -10,9 +10,9 @@ import { chatInstructions, installCode, packageSkill, uninstallCode } from "./in
 import { cliCtx, exportWorkspace, mirror, watch } from "./workspace.ts";
 import { runJob } from "./run.ts";
 import { activeModalProfile, ensureModalDaemon, modalDaemon } from "./modal.ts";
-import { projectRoot, projectWorkspace } from "./hooks.ts";
+import { linkedWorkspace, projectRoot, projectWorkspace } from "./hooks.ts";
 import { rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const program = new Command("contexter")
   .description("Shared context and reasoning for teams using Claude on separate accounts")
@@ -284,8 +284,13 @@ program.command("unlink")
   .description("Unlink this folder: Claude Code sessions here stop sharing with any workspace")
   .action(() => {
     const root = projectRoot(process.cwd());
-    if (!root) throw new CliError("This folder isn't linked to a workspace");
-    rmSync(join(root, ".contexter.json"));
+    if (!root || !linkedWorkspace(process.cwd())) throw new CliError("This folder isn't linked to a workspace");
+    // Inside another linked folder, removing the file would inherit that link: opt out instead.
+    if (projectRoot(dirname(root)) && dirname(root) !== root) {
+      writeFileSync(join(root, ".contexter.json"), `${JSON.stringify({ workspace: null }, null, 2)}\n`);
+    } else {
+      rmSync(join(root, ".contexter.json"));
+    }
     console.log(`Unlinked ${root}.`);
   });
 

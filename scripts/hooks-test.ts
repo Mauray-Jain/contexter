@@ -169,6 +169,38 @@ await step("other projects stay out of the workspace: only linked folders join i
   assert.doesNotMatch(hook("bob", "UserPromptSubmit", { session_id: "bob-1", prompt: "and now?" }).context, /Rename the detector/);
 });
 
+await step("a session relinked to another workspace starts afresh there and leaves the old one", () => {
+  const other = join(root, "other-project");
+  const second = `${slug}-b`;
+  cliIn(other, ["init", second, "--handle", "alice"]);
+  cliIn(other, ["use", slug]);
+  cliIn(other, ["link", slug]);
+  hookIn(other, "UserPromptSubmit", { session_id: "alice-relink", prompt: "Profile the detector inner loop" });
+  assert.match(hook("bob", "UserPromptSubmit", { session_id: "bob-1", prompt: "who is busy?" }).context, /Profile the detector inner loop/);
+  cliIn(other, ["link", second]);
+  hookIn(other, "UserPromptSubmit", { session_id: "alice-relink", prompt: "Vectorise the detector kernels now" });
+  // Another of alice's sessions in the second workspace sees the task there.
+  const peer = join(root, "second-project");
+  mkdirSync(peer, { recursive: true });
+  cliIn(peer, ["link", second]);
+  assert.match(hookIn(peer, "SessionStart", { session_id: "alice-peer", source: "startup" }), /Vectorise the detector kernels/);
+  const bob = hook("bob", "UserPromptSubmit", { session_id: "bob-1", prompt: "who is busy now?" }).context;
+  assert.doesNotMatch(bob, /Vectorise the detector/);
+  assert.doesNotMatch(bob, /working on "Profile the detector/);
+  cliIn(other, ["unlink"]);
+  hookIn(other, "Stop", { session_id: "alice-relink", last_assistant_message: "Done." });
+});
+
+await step("unlinking a folder inside a linked project opts it out instead of inheriting the parent", () => {
+  const nested = join(root, "alice", "vendor-lib");
+  mkdirSync(nested, { recursive: true });
+  cliIn(nested, ["link", slug]);
+  assert.match(cliIn(nested, ["unlink"]), /Unlinked/);
+  assert.equal(JSON.parse(readFileSync(join(nested, ".contexter.json"), "utf8")).workspace, null);
+  assert.equal(hookIn(nested, "UserPromptSubmit", { session_id: "alice-nested", prompt: "Patch the vendored parser" }), "");
+  rmSync(nested, { recursive: true, force: true });
+});
+
 // An approved edit: PreToolUse (checks), the tool runs, PostToolUse (records). Returns the check.
 const editInput = (who: string, session: string, file: string) =>
   ({ session_id: session, tool_name: "Edit", tool_input: { file_path: join(root, who, file), old_string: "a", new_string: "b" } });
