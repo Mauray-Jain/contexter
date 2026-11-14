@@ -168,7 +168,7 @@ function moveText({ from, to }: Move): string {
       "Stop calling contexter tools in this session unless the user asks, and don't post this work to any workspace."
     : `[contexter] This folder is ${from ? `now linked to workspace "${to}" instead of "${from}"` : `now linked to the shared contexter workspace "${to}"`}. ` +
       `From now on pass workspace "${to}" to every contexter tool call${from ? `; don't use "${from}" in this session` : ""}, ` +
-      "and follow contexter's rules (sync first, post_turn after real work).";
+      "and follow contexter's rules.";
 }
 
 // The pending notice, cleared once shown.
@@ -474,6 +474,9 @@ async function backgroundCommand(input: HookInput) {
 
 async function sessionEnd(input: HookInput) {
   const state = readState(input.session_id);
+  // A session detached by an unlink has no state left, but may still have a notice and run mappings.
+  rmSync(noticePath(input.session_id), { force: true });
+  rmSync(bgDir(input.session_id), { recursive: true, force: true });
   if (!state) return;
   const sb = getClient();
   await requireUser(sb);
