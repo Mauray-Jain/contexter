@@ -996,6 +996,10 @@ export async function exportMarkdown(ctx: Ctx, opts: { collection?: string; with
 
 // ─────────────────────────────────────────────────────────────── instructions
 
+// Claude Code: the remote server can't see which folder Claude runs in, and the hooks only attach
+// to folders linked to a workspace. Elsewhere, contexter stays out of the way.
+export const CODE_RULES = `In Claude Code, contexter only applies when this session's context says the project is a shared contexter workspace (its SessionStart message names the workspace). If it doesn't, this project isn't linked: don't call contexter tools unless the user asks. If it does, pass that workspace to every contexter tool call and follow the rules below.\n\n`;
+
 export const CHAT_RULES = `You are working in a shared contexter workspace. Several people, each with their own Claude, work in it together, and contexter makes it feel like one shared conversation.
 - At the start of every reply, call contexter's sync tool with user_request set to the user's message in a sentence, except leave user_request out when the message starts with "!private". Weave anything relevant from teammates into your answer (mention who did what) and answer anything addressed to this user.
 - Never redo a teammate's work: if sync reports possible duplicate work or a teammate is working on the same thing right now, tell the user before starting and build on their work or coordinate with a mention.

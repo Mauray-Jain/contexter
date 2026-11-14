@@ -20,7 +20,7 @@ const text = (...parts: string[]): Text => ({
 function buildServer(db: core.Db, userId: string, client: core.Client) {
   const server = new McpServer(
     { name: "contexter", version: "0.2.0" },
-    { instructions: core.CHAT_RULES },
+    { instructions: client === "claude-code" ? core.CODE_RULES + core.CHAT_RULES : core.CHAT_RULES },
   );
 
   // Every tool runs in the caller's workspace context and ends with the team feed delta, so any

@@ -112,6 +112,14 @@ contexter install code --workspace retrieval-paper
 
 It adds the hooks and the skill, then prints a `claude mcp add …` command to run once.
 
+Claude Code sessions only join a workspace from a folder linked to it (a `.contexter.json`), so
+each project sees only its own team's tasks. With `--scope user` (hooks for every project), link
+each project folder once; other folders stay out of contexter:
+
+```bash
+contexter link retrieval-paper
+```
+
 **Claude chat** (desktop, web, mobile):
 
 ```bash

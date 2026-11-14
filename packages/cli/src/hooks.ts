@@ -110,14 +110,20 @@ export function projectRoot(cwd: string): string | undefined {
   }
 }
 
-// Which workspace a project belongs to: a .contexter.json in the project (or a parent),
-// then CONTEXTER_WORKSPACE, then the CLI's active workspace.
-export function projectWorkspace(cwd: string): string | undefined {
+// The workspace a folder is linked to: a .contexter.json in it (or a parent), then
+// CONTEXTER_WORKSPACE. Hooks only attach to linked folders: with hooks installed for the whole
+// machine, every other project (and its tasks) would otherwise land in the active workspace.
+export function linkedWorkspace(cwd: string): string | undefined {
   const root = projectRoot(cwd);
   if (root) {
     try { return JSON.parse(readFileSync(join(root, ".contexter.json"), "utf8")).workspace; } catch { return undefined; }
   }
-  return process.env.CONTEXTER_WORKSPACE ?? loadConfig().activeWorkspace?.slug;
+  return process.env.CONTEXTER_WORKSPACE || undefined;
+}
+
+// Which workspace a CLI command run here works on: the linked one, else the CLI's active workspace.
+export function projectWorkspace(cwd: string): string | undefined {
+  return linkedWorkspace(cwd) ?? loadConfig().activeWorkspace?.slug;
 }
 
 // A file path as teammates see it: relative to the project root (or cwd), with / separators.
@@ -136,12 +142,23 @@ function emit(event: string, context: string) {
 }
 
 async function context(input: HookInput, opts: { create: boolean }) {
+  // Not a linked folder: stay silent. A session attached before (a project that used to fall back to
+  // the active workspace, or was unlinked or linked elsewhere since) is closed, so its task stops
+  // showing as in progress to the old workspace.
+  const workspace = linkedWorkspace(input.cwd ?? process.cwd());
+  let state = readState(input.session_id);
+  if (state && state.workspace !== workspace) {
+    const sb = getClient();
+    await requireUser(sb);
+    await sb.rpc("end_session", { p_session: state.session });
+    rmSync(statePath(input.session_id), { force: true });
+    rmSync(bgDir(input.session_id), { recursive: true, force: true });
+    state = null;
+  }
+  if (!workspace) return null;
+  if (!state && !opts.create) return null;
   const sb = getClient();
   const user = await requireUser(sb);
-  const state = readState(input.session_id);
-  const workspace = state?.workspace ?? projectWorkspace(input.cwd ?? process.cwd());
-  if (!workspace) return null; // not a contexter project; stay silent
-  if (!state && !opts.create) return null;
   const ctx = await core.loadCtx(sb, user.id, state
     ? { workspace, session: state.session }
     : { workspace, client: "claude-code", externalId: input.session_id, title: basename(input.cwd ?? "") });
@@ -171,7 +188,8 @@ async function sessionStart(input: HookInput) {
     `This project is the shared contexter workspace "${ctx.ws.slug}". Teammates use their own Claude on the same workspace; ` +
     "contexter keeps everyone in sync. Before each user message you'll receive a team feed block with what teammates and " +
     "their Claudes did. Use the contexter MCP tools to read and write shared units (always with expected_version), to record " +
-    "reasoning (record), and to message teammates (mention). If the user's message starts with !private it is not shared.",
+    "reasoning (record), and to message teammates (mention). If the user's message starts with !private it is not shared. " +
+    `Pass workspace "${ctx.ws.slug}" to every contexter tool call in this session.`,
     handed, overview, memory, runs, hint,
   ].filter(Boolean).join("\n\n"));
 }

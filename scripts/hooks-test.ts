@@ -137,6 +137,38 @@ await step("!private turns are not shared", () => {
   assert.doesNotMatch(r.context, /secret/);
 });
 
+// Alice's installed hooks, run from another of her projects (a folder not linked to the workspace).
+function hookIn(dir: string, event: string, input: Record<string, unknown>) {
+  const r = spawnSync("sh", ["-c", installedHooks("alice")[event]], {
+    input: JSON.stringify({ hook_event_name: event, cwd: dir, ...input }), encoding: "utf8",
+    cwd: dir, env: { ...process.env, CONTEXTER_HOME: join(root, "alice", ".home") },
+  });
+  return r.stdout ? JSON.parse(r.stdout).hookSpecificOutput?.additionalContext ?? "" : "";
+}
+
+const cliIn = (dir: string, args: string[]) => spawnSync("node", [CLI, ...args], {
+  encoding: "utf8", cwd: dir, env: { ...process.env, CONTEXTER_HOME: join(root, "alice", ".home") },
+}).stdout;
+
+await step("other projects stay out of the workspace: only linked folders join it", () => {
+  const other = join(root, "other-project");
+  mkdirSync(other, { recursive: true });
+  // Alice's active workspace is this one, but the folder isn't linked: nothing is shown or shared.
+  assert.equal(hookIn(other, "SessionStart", { session_id: "alice-other", source: "startup" }), "");
+  assert.equal(hookIn(other, "UserPromptSubmit", { session_id: "alice-other", prompt: "Refactor the watermark detector module" }), "");
+  hookIn(other, "Stop", { session_id: "alice-other", last_assistant_message: "Refactored the watermark detector." });
+  const r = hook("bob", "UserPromptSubmit", { session_id: "bob-1", prompt: "anything new?" });
+  assert.doesNotMatch(r.context, /watermark/);
+
+  // Linking it joins the workspace; unlinking leaves it again, even for a session already attached.
+  assert.match(cliIn(other, ["link", slug]), /Linked/);
+  assert.match(hookIn(other, "UserPromptSubmit", { session_id: "alice-other", prompt: "Tidy the detector tests" }), new RegExp(slug));
+  assert.match(cliIn(other, ["unlink"]), /Unlinked/);
+  assert.equal(hookIn(other, "UserPromptSubmit", { session_id: "alice-other", prompt: "Rename the detector helpers please" }), "");
+  hookIn(other, "Stop", { session_id: "alice-other", last_assistant_message: "Renamed the detector helpers." });
+  assert.doesNotMatch(hook("bob", "UserPromptSubmit", { session_id: "bob-1", prompt: "and now?" }).context, /Rename the detector/);
+});
+
 // An approved edit: PreToolUse (checks), the tool runs, PostToolUse (records). Returns the check.
 const editInput = (who: string, session: string, file: string) =>
   ({ session_id: session, tool_name: "Edit", tool_input: { file_path: join(root, who, file), old_string: "a", new_string: "b" } });

@@ -10,7 +10,9 @@ import { chatInstructions, installCode, packageSkill, uninstallCode } from "./in
 import { cliCtx, exportWorkspace, mirror, watch } from "./workspace.ts";
 import { runJob } from "./run.ts";
 import { activeModalProfile, ensureModalDaemon, modalDaemon } from "./modal.ts";
-import { projectWorkspace } from "./hooks.ts";
+import { projectRoot, projectWorkspace } from "./hooks.ts";
+import { rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 const program = new Command("contexter")
   .description("Shared context and reasoning for teams using Claude on separate accounts")
@@ -265,6 +267,27 @@ install.command("chat")
 program.command("uninstall").description("Remove contexter hooks and skill from Claude Code")
   .addOption(new Option("--scope <scope>").choices(["user", "project"]).default("project"))
   .action((opts) => console.log(uninstallCode({ ...opts, cwd: process.cwd() })));
+
+// Claude Code sessions only join a workspace from a linked folder, so each project sees its own tasks.
+program.command("link")
+  .description("Link this folder (a project) to a workspace, so Claude Code sessions here join it")
+  .argument("<slug>")
+  .action(async (slug) => {
+    const sb = getClient();
+    await requireUser(sb);
+    const ws = check(await sb.from("workspaces").select("slug").eq("slug", slug).maybeSingle());
+    if (!ws) throw new CliError(`No workspace "${slug}" that you're a member of`);
+    writeFileSync(join(process.cwd(), ".contexter.json"), `${JSON.stringify({ workspace: slug }, null, 2)}\n`);
+    console.log(`Linked ${process.cwd()} to workspace "${slug}". New Claude Code sessions here join it.`);
+  });
+program.command("unlink")
+  .description("Unlink this folder: Claude Code sessions here stop sharing with any workspace")
+  .action(() => {
+    const root = projectRoot(process.cwd());
+    if (!root) throw new CliError("This folder isn't linked to a workspace");
+    rmSync(join(root, ".contexter.json"));
+    console.log(`Unlinked ${root}.`);
+  });
 
 program.command("hook", { hidden: true })
   .argument("<event>", "session-start | user-prompt-submit | stop | session-end")
