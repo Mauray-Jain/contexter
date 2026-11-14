@@ -110,7 +110,9 @@ contexter join <code> --handle priya
 contexter install code --workspace retrieval-paper
 ```
 
-It adds the hooks and the skill, then prints a `claude mcp add …` command to run once.
+It adds the hooks, the skill and the MCP server (`.mcp.json`), and approves the server in your
+git-ignored `.claude/settings.local.json`, since the Code tab never asks. Start a new session
+afterwards. With `--scope user` it prints a `claude mcp add …` command to run once instead.
 
 **Claude chat** (desktop, web, mobile):
 
