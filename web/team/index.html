@@ -6,7 +6,7 @@
   <title>Team · contexter</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500..800&family=Hanken+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
   <link rel="stylesheet" href="../style.css">
   <script>try{var t=localStorage.getItem("contexter-theme");if(t)document.documentElement.setAttribute("data-theme",t)}catch(e){}</script>
   <script src="../config.js"></script>
@@ -37,10 +37,10 @@
   let myRole = "member";
   let invitePanel = false;
   const SECTIONS = {
-    people: ["People", "Everyone on the team and which projects they can open."],
-    projects: ["Projects", "Each project is a shared workspace for your team's Claudes."],
-    invitations: ["Invitations", "People who have been invited but haven't accepted yet."],
-    settings: ["Team settings", "Defaults for new members and your other teams."],
+    people: ["People", (t) => `Everyone in ${t} and the projects each person can open.`],
+    projects: ["Projects", (t) => `Shared workspaces in ${t}. Each one keeps its own feed, content and decisions.`],
+    invitations: ["Invitations", (t) => `People invited to ${t} who have not accepted yet.`],
+    settings: ["Team settings", (t) => `Defaults for new members of ${t}, and your other teams.`],
   };
   const section = () => (location.hash.slice(1) in SECTIONS ? location.hash.slice(1) : "people");
 
@@ -162,14 +162,14 @@
   function pendingTable(invites, ov) {
     const names = new Map(ov.projects.map((p) => [p.id, p.name]));
     if (!invites.length) return el("section", { class: "card" }, el("div", { class: "empty" }, emptyMark("mail"),
-      el("h3", {}, "No pending invitations"), el("p", {}, "Invite teammates by email and they'll show up here until they accept."),
+      el("h3", {}, "Nobody is waiting"), el("p", {}, "Invite teammates by email. They show up here until they accept."),
       el("button", { type: "button", class: "primary", onclick: () => { invitePanel = true; location.hash = "people"; render(); } }, icon("plus"), "Invite people")));
     return el("section", { class: "card" }, el("div", { class: "table-wrap" }, el("table", {},
       el("thead", {}, el("tr", {}, ["Email", "Access", "Expires", ""].map((h) => el("th", {}, h)))),
       el("tbody", {}, invites.map((i) => el("tr", {},
         el("td", {}, el("div", { class: "cell-person" }, avatar(i.email), el("div", {}, el("b", {}, i.email), el("span", {}, i.team_role)))),
         el("td", {}, (i.grants ?? []).length
-          ? el("div", { class: "chips" }, i.grants.map((g) => el("span", { class: "badge" }, `${names.get(g.workspace_id) ?? "project"} · ${g.role}`)))
+          ? el("div", { class: "chips" }, i.grants.map((g) => el("span", { class: "badge" }, `${names.get(g.workspace_id) ?? "project"} (${g.role})`)))
           : el("span", { class: "muted" }, "Team only")),
         el("td", { class: "num muted" }, new Date(i.expires_at).toLocaleDateString()),
         el("td", {}, el("div", { class: "actions" },
@@ -236,7 +236,7 @@
     const overview = await rpc("team_overview", { p_team: team.id });
     const { data: invites } = await sb.from("email_invites").select("*").eq("team_id", team.id).eq("status", "pending").order("created_at", { ascending: false });
     const inviteBtn = el("button", { type: "button", class: "primary", onclick: () => { invitePanel = true; if (section() !== "people") location.hash = "people"; else render(); } }, icon("plus"), "Invite people");
-    shell.setHeader({ title, subtitle: `${team.name} · ${sub}`, actions: [teamPicker(), sec === "people" || sec === "invitations" ? inviteBtn : null] });
+    shell.setHeader({ title, subtitle: sub(team.name), actions: [teamPicker(), sec === "people" || sec === "invitations" ? inviteBtn : null] });
     let body;
     if (sec === "people") body = el("div", {}, invitePanel ? invitePanelCard(overview) : null,
       overview.roster.length ? peopleTable(overview) : null);
@@ -247,7 +247,7 @@
   }
 
   async function renderMember() {
-    shell.setHeader({ title: "Your projects", subtitle: `${team.name} · what you can open`, actions: [teamPicker()] });
+    shell.setHeader({ title: "Your projects", subtitle: `The projects you can open in ${team.name}.`, actions: [teamPicker()] });
     const { data } = await sb.from("members").select("role, workspaces(slug, name, team_id)").eq("user_id", user.id);
     const mine = (data ?? []).filter((m) => m.workspaces?.team_id === team.id);
     shell.content.replaceChildren(flash, mine.length

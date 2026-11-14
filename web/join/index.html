@@ -6,7 +6,7 @@
   <title>Join your team · contexter</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500..800&family=Hanken+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
   <link rel="stylesheet" href="../style.css">
   <script>try{var t=localStorage.getItem("contexter-theme");if(t)document.documentElement.setAttribute("data-theme",t)}catch(e){}</script>
   <script src="../config.js"></script>
@@ -16,7 +16,7 @@
 <script type="module">
   // Where an emailed invitation lands: sign in, apply the invitation, then walk through
   // connecting Claude. The invitation is matched to the verified email, never to a code.
-  import { PRODUCT, avatar, cfg, command, el, emptyMark, icon, requireSignIn, sb, signOut } from "../app.js";
+  import { avatar, brand, cfg, command, el, emptyMark, icon, requireSignIn, sb, signOut, toggleTheme, weave } from "../app.js";
 
   const main = document.getElementById("main");
 
@@ -50,8 +50,8 @@
   const { data: inTeams } = await sb.from("team_members").select("teams(name)").eq("user_id", user.id);
 
   const top = el("header", { class: "join-top" },
-    el("span", { class: "brand", style: "padding:0" }, el("span", { class: "brand-mark" }, icon("feed")), PRODUCT),
-    el("span", { class: "spacer" }), el("span", { class: "muted" }, user.email),
+    brand(), el("span", { class: "spacer" }), el("span", { class: "muted" }, user.email),
+    el("button", { type: "button", class: "btn-ghost btn-sm", "aria-label": "Switch between light and dark", onclick: toggleTheme }, icon("moon")),
     el("button", { type: "button", class: "btn-ghost btn-sm", onclick: signOut }, "Sign out"));
   const page = (...kids) => main.replaceChildren(el("div", { class: "join" }, top, ...kids));
 
@@ -71,6 +71,10 @@
       el("p", { class: "muted" }, "Have an invite code instead? Run ", el("code", {}, "contexter join <code> --handle <name>"), "."))));
     throw new Error("no projects");
   }
+
+  const me = (projects[0]?.handle ?? user.email.split("@")[0]);
+  const { data: mates } = await sb.from("members").select("handle, user_id").in("workspace_id", projects.map((p) => p.id));
+  const teammates = [...new Set((mates ?? []).filter((m) => m.user_id !== user.id).map((m) => m.handle))];
 
   // Which project to connect first: one just granted, else the first.
   let chosen = projects.find((p) => justJoined.has(p.slug)) ?? projects[0];
@@ -133,14 +137,13 @@
   renderSteps();
 
   page(
-    el("section", { class: "hero" }, el("div", { class: "avatars" }, avatar(user.email)),
-      el("h1", {}, joinedTeams.length
-        ? ["You're in. Welcome to ", el("span", { class: "pill" }, el("i", { class: "pill-dot" }), joinedTeams.join(", ")), "."]
-        : ["You're all ", el("span", { class: "pill" }, el("i", { class: "pill-dot" }), "set up"), "."]),
-      el("p", {}, joinedTeams.length
-        ? `You can open ${projects.length === 1 ? projects[0].name : `${projects.length} projects`}. Four quick steps connect your Claude, and then everything your team does shows up in its context.`
-        : "Four quick steps connect your Claude to your team's shared workspace.")),
-    el("section", { class: "card", style: "margin-top:16px" },
+    el("section", { class: "hero" },
+      weave([...teammates.slice(0, 3), me].sort((x, y) => (x === me) - (y === me)), { you: me }),
+      el("h1", { class: "enter", style: "--i:0" }, joinedTeams.length ? `You're in, ${me}. Welcome to ${joinedTeams.join(" and ")}.` : `You're all set, ${me}.`),
+      el("p", { class: "enter", style: "--i:1" }, joinedTeams.length
+        ? `You can open ${projects.length === 1 ? projects[0].name : `${projects.length} projects`}. Connect your Claude in four short steps and it joins the team's conversation.`
+        : "Connect your Claude in four short steps and it joins the team's conversation.")),
+    el("section", { class: "card enter", style: "margin-top:8px;--i:2" },
       el("div", { class: "card-head" }, el("h2", {}, "Connect your Claude"), progressLabel),
       el("div", { style: "padding:0 16px" }, el("div", { class: "progress", "aria-hidden": "true" }, bar)),
       el("div", { class: "card-body", style: "padding-bottom:4px" }, picker),

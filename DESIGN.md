@@ -1,47 +1,29 @@
 # Design: contexter web app
 
-The familiar category standard, executed carefully: a calm, dense team-admin product that stays friendly. Craft bar: Linear (density and calm), Notion/Slack team admin (approachable access and invites), Vercel (crisp type and status feeds).
+**Idea: threads.** contexter turns many separate Claudes into one conversation. Every teammate has a colour, and their threads braid into one line. That is the single memorable element: the landing weave flowing into the product window, the join page weaving the newcomer's own thread in, and each person's thread running through their rows in the feed. Everything around it stays quiet, mature and dependable.
+
+Built with guidance from ui-skills.com sources read as plain markdown: Anthropic `frontend-design` (plan first, avoid generated-UI tells), Jakub Krehel `better-ui` (exact polish values), ibelick `baseline-ui` (one accent per view, no glow or purple gradients).
 
 ## Foundations
 
-Palette source: the ui-ux-pro-max "Remote Work / Collaboration Tool" family (calm indigo + success green on a soft lavender ground), with every role named and contrast-checked. Light is the default; dark (deep indigo) is one click or the `T` key away.
-
 | Role | Light | Dark |
 |---|---|---|
-| Ground | `#F5F3FF` + soft indigo glows | `#0C0B1E` + indigo glow |
-| Surface / raised | `#FFFFFF` / `#EEF0FD` | `#14132E` / `#1C1B40` |
-| Text / muted | `#1E1B4B` (14.6:1) / `#475569` (6.9:1) | `#EEF0FF` (17:1) / `#A9ACD9` (8.3:1) |
-| Border | `#E0E7FF` / strong `#C7CDF3` | indigo 14% / 26% |
-| Primary (fills) | `#4F46E5`, white text 6.3:1 | `#818CF8`, `#0F172A` text 6.0:1 |
-| Secondary (rings, gradients) | `#818CF8` | `#6366F1` |
-| Success | text `#047857`, dot `#059669`, soft `#D1FAE5` | `#34D399` |
-| Warning | `#B45309` on `#FEF3C7` | `#FBBF24` |
-| Danger | `#B91C1C` on `#FEE2E2` | `#F87171` |
+| Ground | `#F7F7F5` | `#0F1013` |
+| Surface / raised / sunken | `#FFFFFF` / `#F1F1EE` / `#ECECE8` | `#17181C` / `#1E1F24` / `#121316` |
+| Text / muted / faint | `#17181C` / `#5B5E69` / `#767985` | `#F2F2EF` / `#A6A8B1` / `#8C8F99` |
+| Accent (actions, links, focus only) | cobalt `#2B50E8` | `#6E8BFF` |
+| Success / warning / danger | `#0F7A4F` / `#8A5A00` / `#B42318` | `#4ACB91` / `#F2C14E` / `#FF7B6E` |
+| Person colours (mean "this person" only) | coral `#F0643C`, saffron `#E3A008`, mint `#16A672`, sky `#2E8FD8`, violet `#7C5CE6`, rose `#DB4C86` | same |
 
-Notes: the database's black-on-indigo pairing was replaced because it falls short of 4.5:1 for white-on-`#6366F1`; filled indigo uses `#4F46E5`. Indigo as text uses `--accent-ink`.
-
-- **Type:** Plus Jakarta Sans (the skill's "Friendly SaaS" pairing; 800 for display, 700 headings, 400/500 body), JetBrains Mono for commands and refs only.
-- **Elevation:** declared once, as 1px borders. Shadows only on floating layers and the primary button's lift.
-- **Shape:** 12px cards, 7-10px controls, pills for badges, chips and the headline pill.
-- **Motion:** 150-250ms exponential ease-out; cross-page view transitions with a sliding nav highlight; staggered feed rows; a Live dot that pulses only because the feed is live; reduced-motion respected.
-- **Signature:** the headline pill with cycling phrases, the product window on the landing, and the ⌘K palette (also `/`), with single-key shortcuts T, I, G F, G P.
+- **Type:** Bricolage Grotesque for headlines (700, tight), Hanken Grotesk for the interface, JetBrains Mono only inside commands.
+- **Surfaces:** layered shadow rings for elevation; borders only for structure (tables, inputs, dividers). Radius 14px cards, 10px controls.
+- **Motion (better-ui values):** press scales to 0.96 over 150ms; hover only under `(hover: hover)`; transitions name their properties; one orchestrated entrance (100ms stagger, 4px blur, 12px rise, 300ms); the weave draws once, then pulses travel along threads and pause off-screen; theme switches never animate; everything gated by `prefers-reduced-motion`.
+- **Copy:** sentences, not dot-joined fragments; no eyebrow labels; buttons name the action.
 
 ## Components
 
-- **App shell:** 232px sidebar (wordmark, Feed / People / Projects / Invitations / Team settings, theme toggle, signed-in user), page header with title, one-line subtitle and the primary action. Below 860px the sidebar becomes a top bar with a scrolling nav row.
-- **Buttons:** primary (accent), secondary (bordered), ghost, danger text; 34px default, 28px small. Inputs share the same height and focus ring.
-- **Tables:** hairline rows, avatar + email cells, role badges, access chips with inline role selects, row hover. Wide tables scroll inside their card.
-- **Avatars:** initials on a hue derived from the name (8 hues), same lightness across hues.
-- **Empty states:** simple geometric mark, one line of what it is, one action.
-- **Command boxes:** mono text with a copy button that confirms inline.
-- **Onboarding checklist:** numbered steps, manual "Mark done", progress bar, the last step completes itself when the first Claude session arrives.
-
-## Rules
-
-- No big-number stat tiles, no eyebrow labels, no gradient text, no emoji as icons. Icons are one 1.75px stroke set drawn in `app.js`.
-- The product name lives in one constant (`PRODUCT` in `web/app.js`); the name may change.
-- Accessibility: visible focus rings, 4.5:1 text contrast in both themes, labelled controls, polite live regions for results.
+App shell (sidebar with the threads mark, search/⌘K, five sections, theme toggle, user), page header (display title + one sentence), feed card with thread timeline beside one quiet rail, tables with person avatars and access chips, inline invite panel, empty states drawn as small thread knots, command boxes, join checklist with progress.
 
 ## Open items
 
-No logo yet; the brand mark is a placeholder glyph. No real illustrations or screenshots exist. `DESIGN.md` was written by hand at finish because the independent documenter and finish-review agents were not available in this environment, so `.impeccable/design.json` was not generated.
+No commissioned logo yet (the mark is three threads becoming one). Example names on the landing are synthetic and labelled as example activity.

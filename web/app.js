@@ -48,18 +48,27 @@ export function icon(name) {
   return t.content.firstChild;
 }
 
-// A friendly empty-state mark: plain geometry, drawn in the accent colour.
-export function emptyMark(kind = "people") {
+// Empty-state marks: a few threads in person colours, drawn as plain geometry.
+export function emptyMark(kind = "feed") {
   const t = document.createElement("template");
-  const shapes = {
-    people: '<circle cx="42" cy="34" r="12" fill="currentColor" opacity=".18"/><circle cx="78" cy="34" r="12" fill="currentColor" opacity=".32"/><rect x="24" y="50" width="36" height="20" rx="10" fill="currentColor" opacity=".18"/><rect x="60" y="50" width="36" height="20" rx="10" fill="currentColor" opacity=".32"/>',
-    folder: '<rect x="22" y="22" width="76" height="46" rx="8" fill="currentColor" opacity=".18"/><rect x="22" y="14" width="30" height="16" rx="6" fill="currentColor" opacity=".32"/>',
-    mail: '<rect x="20" y="20" width="80" height="48" rx="8" fill="currentColor" opacity=".18"/><path d="m24 28 36 24 36-24" stroke="currentColor" stroke-width="3" fill="none" opacity=".5" stroke-linecap="round" stroke-linejoin="round"/>',
-    feed: '<rect x="20" y="16" width="80" height="14" rx="7" fill="currentColor" opacity=".32"/><rect x="20" y="38" width="64" height="14" rx="7" fill="currentColor" opacity=".18"/><rect x="20" y="60" width="72" height="14" rx="7" fill="currentColor" opacity=".18"/>',
+  const strand = (y, c, end) => `<path d="M8 ${y} C 40 ${y}, 52 40, ${end} 40" stroke="var(${c})" stroke-width="3" fill="none" stroke-linecap="round"/>`;
+  const knots = {
+    feed: strand(14, "--p0", 66) + strand(40, "--p3", 66) + strand(66, "--p2", 66) + '<path d="M66 40 H 124" stroke="var(--text)" stroke-width="3.5" stroke-linecap="round"/>',
+    people: strand(18, "--p4", 66) + strand(62, "--p1", 66) + '<circle cx="66" cy="40" r="7" fill="var(--surface)" stroke="var(--text)" stroke-width="3"/>',
+    folder: '<rect x="30" y="18" width="72" height="44" rx="10" fill="none" stroke="var(--text)" stroke-width="3"/>' + strand(40, "--p3", 30),
+    mail: '<rect x="34" y="18" width="70" height="44" rx="10" fill="none" stroke="var(--text)" stroke-width="3"/><path d="m38 24 31 20 31-20" stroke="var(--text)" stroke-width="3" fill="none" stroke-linejoin="round"/>' + strand(40, "--p0", 34),
   };
-  t.innerHTML = `<svg viewBox="0 0 120 80" aria-hidden="true">${shapes[kind] ?? shapes.people}</svg>`;
+  t.innerHTML = `<svg viewBox="0 0 132 80" aria-hidden="true">${knots[kind] ?? knots.feed}</svg>`;
   return t.content.firstChild;
 }
+
+// The mark: three threads becoming one.
+export function logo() {
+  const t = document.createElement("template");
+  t.innerHTML = '<span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M2 3.5c3 0 4 4.5 7 4.5M2 12.5c3 0 4-4.5 7-4.5M2 8h12"/></svg></span>';
+  return t.content.firstChild;
+}
+export const brand = (extra = {}) => el(extra.href ? "a" : "span", { class: "brand", ...extra }, logo(), PRODUCT);
 
 // ───────── theme ─────────
 function applyTheme(mode) {
@@ -72,21 +81,68 @@ function currentTheme() {
 }
 export function toggleTheme() {
   const next = currentTheme() === "dark" ? "light" : "dark";
+  document.documentElement.classList.add("theme-switching");
   applyTheme(next);
+  getComputedStyle(document.documentElement).opacity; // flush styles before transitions come back
+  requestAnimationFrame(() => document.documentElement.classList.remove("theme-switching"));
   try { localStorage.setItem("contexter-theme", next); } catch { /* private mode: the choice just won't persist */ }
   document.dispatchEvent(new Event("contexter-theme"));
 }
 try { applyTheme(localStorage.getItem("contexter-theme")); } catch { /* ignore */ }
 
 // ───────── people ─────────
-const HUES = [275, 30, 155, 330, 85, 215, 5, 185];
+// Each person keeps one colour everywhere: their avatar, their thread in the feed, the landing weave.
+export function personColor(name) {
+  let h = 0;
+  for (const ch of String(name ?? "").split("@")[0].toLowerCase()) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return `var(--p${h % 6})`;
+}
 export function avatar(name, size = "") {
   const text = String(name ?? "?");
-  let h = 0;
-  for (const ch of text) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
   const parts = text.split("@")[0].split(/[\s._-]+/).filter(Boolean);
   const initials = ((parts[0]?.[0] ?? "?") + (parts[1]?.[0] ?? "")).toUpperCase();
-  return el("span", { class: `avatar ${size}`.trim(), style: `--h:${HUES[h % HUES.length]}`, "aria-hidden": "true" }, initials);
+  return el("span", { class: `avatar ${size}`.trim(), style: `--c:${personColor(text)}`, "aria-hidden": "true" }, initials);
+}
+
+// The weave: each named thread flows in from the sides and braids into one line at the bottom centre.
+// Drawn once on load; small pulses then travel along the threads (skipped under reduced motion).
+export function weave(names, { you } = {}) {
+  const NS = "http://www.w3.org/2000/svg";
+  const W = 1080, H = 190, mx = W / 2, my = 172;
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H + 18}`);
+  svg.setAttribute("class", "threads");
+  svg.setAttribute("aria-hidden", "true");
+  const left = names.filter((_, i) => i % 2 === 0), right = names.filter((_, i) => i % 2 === 1);
+  const rowY = (i, n) => 22 + (n === 1 ? 50 : (i * 110) / Math.max(1, n - 1));
+  const motion = !matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const add = (tag, attrs) => { const n = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v); svg.append(n); return n; };
+  let k = 0;
+  for (const [side, list] of [["l", left], ["r", right]]) {
+    list.forEach((name, i) => {
+      const y = rowY(i, list.length);
+      const x0 = side === "l" ? 120 : W - 120;
+      const c1 = side === "l" ? 380 : W - 380, c2 = side === "l" ? mx - 120 : mx + 120;
+      const d = `M ${x0} ${y} C ${c1} ${y}, ${c2} ${my - 6}, ${mx} ${my}`;
+      const color = personColor(name);
+      const path = add("path", { d, class: "strand", stroke: color, pathLength: "100", style: `--len:100;--d:${k * 0.12}s` });
+      if (name === you) path.setAttribute("stroke-width", "4.5");
+      add("text", { x: side === "l" ? x0 - 14 : x0 + 14, y: y + 5, "text-anchor": side === "l" ? "end" : "start", class: "name" }).textContent = name === you ? `${name} (you)` : name;
+      add("circle", { cx: x0, cy: y, r: 5, fill: color });
+      if (motion) {
+        const dot = add("circle", { r: "3.5", fill: color, class: "pulse" });
+        const am = document.createElementNS(NS, "animateMotion");
+        am.setAttribute("dur", `${3.2 + (k % 3) * 0.6}s`); am.setAttribute("repeatCount", "indefinite"); am.setAttribute("begin", `${1.8 + k * 0.7}s`); am.setAttribute("path", d);
+        dot.append(am);
+      }
+      k++;
+    });
+  }
+  add("path", { d: `M ${mx} ${my} L ${mx} ${H + 18}`, class: "merged", pathLength: "100", style: `--len:100;--d:${k * 0.12 + 0.5}s` });
+  add("circle", { cx: mx, cy: my, r: 6, fill: "var(--surface)", stroke: "var(--text)", "stroke-width": "3" });
+  // Loops pause while the weave is off-screen.
+  new IntersectionObserver(([e]) => { e.isIntersecting ? svg.unpauseAnimations?.() : svg.pauseAnimations?.(); }).observe(svg);
+  return el("div", { class: "weave" }, svg);
 }
 
 // ───────── command palette (⌘K) ─────────
@@ -182,8 +238,8 @@ export function appShell(mount, user, active) {
   const content = el("div");
   mount.replaceChildren(el("div", { class: "app" },
     el("aside", { class: "sidebar" },
-      el("a", { class: "brand", href: base }, el("span", { class: "brand-mark" }, icon("feed")), PRODUCT),
-      el("button", { type: "button", class: "jump", onclick: openPalette, "aria-label": "Open the command palette" }, icon("search"), el("span", {}, "Jump to…"), el("span", { class: "kbd" }, "⌘K")),
+      brand({ href: base }),
+      el("button", { type: "button", class: "jump", onclick: openPalette, "aria-label": "Open the command palette" }, icon("search"), el("span", {}, "Search or jump to"), el("span", { class: "kbd" }, "⌘K")),
       el("nav", { class: "nav", "aria-label": "Main" }, [...links.values()]),
       el("span", { class: "spacer" }),
       themeBtn,
@@ -227,51 +283,36 @@ export async function requireSignIn(mount, { title = `Sign in to ${PRODUCT}`, no
       status.textContent = `We emailed a 6-digit code to ${email.value.trim()}.`;
       codeForm.hidden = false;
       code.focus();
-    } }, email, el("button", { type: "submit" }, "Email me a code"));
-    const github = el("button", { type: "button", class: "primary wide", style: "margin-bottom:12px", onclick: () =>
+    } }, email, el("button", { type: "submit" }, "Send code"));
+    const github = el("button", { type: "button", class: "primary wide", onclick: () =>
       sb.auth.signInWithOAuth({ provider: "github", options: { redirectTo: location.href } }) }, "Continue with GitHub");
 
     const feed = [
-      ["priya", "asked: “tighten the ablation paragraph in method”", "just now"],
-      ["priya", "→ their Claude: rewrote it, two sentences shorter", "just now"],
-      ["mehul", "edited sections/results (v4→v5)", "2m ago"],
-      ["jordan", "recorded D-0003: frame the result as a trade-off", "9m ago"],
-      ["sam", "asked: “@priya can you check Table 2?”", "14m ago"],
+      ["priya", "asked: “tighten the ablation paragraph in method”", "now"],
+      ["priya", "Claude rewrote it, two sentences shorter", "now"],
+      ["mehul", "edited sections/results, version 4 to 5", "2m"],
+      ["jordan", "decided to frame the result as a trade-off", "9m"],
+      ["theo", "asked priya to check Table 2", "14m"],
     ];
-    // The headline's pill cycles through phrases; the form sits right under it.
-    const words = ["in sync", "on one page", "in the loop", "up to speed"];
-    // Every phrase is stacked in one grid cell, so the pill is always as wide as the longest one and never jumps.
-    const spans = words.map((w, i) => el("span", { class: i === 0 ? "on" : "" }, w));
-    const word = el("span", { class: "pill-text" }, spans);
-    let wi = 0;
-    const cycle = setInterval(() => {
-      if (!word.isConnected) return clearInterval(cycle);
-      spans[wi].classList.remove("on");
-      wi = (wi + 1) % words.length;
-      spans[wi].classList.add("on");
-    }, 2600);
-    const chip = (cls, who, what) => el("div", { class: `float-chip ${cls}`, "aria-hidden": "true" }, avatar(who, "sm"), el("span", {}, el("b", {}, who), what));
     mount.replaceChildren(el("div", { class: "landing" },
-      el("header", { class: "land-top" },
-        el("span", { class: "brand", style: "padding:0" }, el("span", { class: "brand-mark" }, icon("feed")), PRODUCT),
-        el("button", { type: "button", class: "btn-ghost btn-sm", "aria-label": "Toggle light and dark theme", onclick: toggleTheme }, icon("moon"))),
+      el("header", { class: "land-top" }, brand(),
+        el("button", { type: "button", class: "btn-ghost btn-sm", "aria-label": "Switch between light and dark", onclick: toggleTheme }, icon("moon"))),
       el("div", { class: "land-hero" },
-        el("h1", {}, "Every Claude on your team,", el("br"), el("span", { class: "pill" }, el("i", { class: "pill-dot" }), word), "."),
-        el("p", { class: "lede" }, note || "One shared workspace, a live feed of what everyone asked and changed, and the reasoning behind every decision."),
-        el("div", { class: "auth" },
+        el("h1", { class: "enter", style: "--i:0" }, "One conversation for every Claude on your team"),
+        el("p", { class: "lede enter", style: "--i:1" }, note || "Each teammate works with their own Claude. contexter shares what everyone asked, what changed and why, so every Claude starts each message already caught up."),
+        el("div", { class: "auth enter", style: "--i:2" },
           el("div", { class: "auth-row" }, github),
-          el("div", { class: "divider" }, "or use your email"),
+          el("div", { class: "divider" }, "or with your email"),
           emailForm, codeForm, status)),
-      el("div", { class: "window-wrap" },
-        chip("c1", "priya", "'s Claude is editing sections/method"),
-        chip("c2", "jordan", " joined the project"),
-        el("section", { class: "window", "aria-label": "Example of the live feed" },
-          el("div", { class: "window-bar" }, el("i"), el("i"), el("i"), el("span", {}, "Web paper · Team feed"), el("span", { class: "live" }, el("i"), "Live")),
-          el("div", { class: "window-body" },
-            el("ul", {}, feed.map(([who, what, when], i) => el("li", { style: `--i:${i}` }, avatar(who, "sm"), el("span", {}, el("b", {}, who), " ", what), el("span", { class: "when" }, when)))),
-            el("div", { class: "window-side" }, el("b", {}, "Active now"),
-              ["priya", "mehul"].map((n) => el("div", { class: "cell-person" }, el("span", { class: "avatar-live" }, avatar(n, "sm")), el("span", {}, n))),
-              el("small", {}, "Example activity")))))));
+      weave(["priya", "mehul", "jordan", "theo"]),
+      el("section", { class: "window", "aria-label": "Example of a team feed" },
+        el("div", { class: "window-bar" }, el("i"), el("i"), el("i"), el("span", {}, "Retrieval paper, team feed"), el("span", { class: "live" }, el("i"), "Live")),
+        el("div", { class: "window-body" },
+          el("ul", { class: "feed" }, feed.map(([who, what, when]) => el("li", { style: `--c:${personColor(who)}` }, avatar(who),
+            el("div", { class: "body" }, el("span", { class: "who" }, who), " ", what), el("span", { class: "when" }, when)))),
+          el("div", { class: "window-side" }, el("b", {}, "Active now"),
+            ["priya", "mehul"].map((n) => el("div", { class: "cell-person", style: "min-width:0" }, el("span", { class: "avatar-live" }, avatar(n, "sm")), el("span", {}, n))),
+            el("small", {}, "Example activity"))))));
   });
 }
 

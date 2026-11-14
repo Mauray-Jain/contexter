@@ -6,7 +6,7 @@
   <title>Feed · contexter</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500..800&family=Hanken+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
   <link rel="stylesheet" href="style.css">
   <script>try{var t=localStorage.getItem("contexter-theme");if(t)document.documentElement.setAttribute("data-theme",t)}catch(e){}</script>
   <script src="config.js"></script>
@@ -18,7 +18,7 @@
 <script type="module">
   // Live team feed: what teammates and their Claudes did, who is active, units and reasoning,
   // updated through Supabase Realtime.
-  import { ago, appShell, avatar, el, emptyMark, requireSignIn, sb, setCommands, transition } from "./app.js";
+  import { ago, appShell, avatar, el, emptyMark, personColor, requireSignIn, sb, setCommands, transition } from "./app.js";
 
   const main = document.getElementById("main");
   const user = await requireSignIn(main);
@@ -30,7 +30,7 @@
   if (!memberships?.length) {
     shell.setHeader({ title: "Feed", subtitle: "Your team's activity shows up here." });
     shell.content.replaceChildren(el("section", { class: "card" }, el("div", { class: "empty" }, emptyMark("feed"),
-      el("h3", {}, "You're not in a project yet"),
+      el("h3", {}, "You are not in a project yet"),
       el("p", {}, "Ask a team admin to invite you, or create a team of your own and add a project."),
       el("div", { class: "row", style: "margin:8px 0 0" }, el("a", { class: "btn btn-primary", href: "team/" }, "Set up a team")))));
     throw new Error("no workspaces");
@@ -40,9 +40,9 @@
   let ws = (memberships.find((m) => m.workspaces.slug === pick) ?? memberships.find((m) => m.workspaces.id === profile?.active_workspace) ?? memberships[0]).workspaces;
 
   const feedList = el("ul", { class: "feed", "aria-live": "polite" });
-  const presence = el("div", { class: "card-body" });
+  const presence = el("div");
   const unitsBody = el("tbody");
-  const unitsEmpty = el("div", { class: "empty", hidden: true }, el("p", {}, "No units yet. They appear as your team writes shared content."));
+  const unitsEmpty = el("p", { class: "muted", hidden: true, style: "margin:0" }, "No shared units yet.");
   const questions = el("ul", { class: "plain" });
   const decisions = el("ul", { class: "plain" });
   const memory = el("p", { class: "memory" });
@@ -56,19 +56,20 @@
     transition(() => { load(); });
   } }, memberships.map((m) => el("option", { value: m.workspaces.slug, selected: m.workspaces.id === ws.id }, m.workspaces.name)));
 
-  const section = (title, body, extra) => el("section", { class: "card" }, el("div", { class: "card-head" }, el("h2", {}, title), extra), body);
+  // The feed is the page; everything else lives in one quiet rail beside it.
+  const railPart = (title, body) => el("section", {}, el("h2", {}, title), el("div", { class: "rail-body" }, body));
   shell.content.replaceChildren(el("div", { class: "layout-2" },
-    section("Team feed", feedList, el("span", { class: "live", title: "Updates arrive instantly" }, el("i"), "Live")),
-    el("div", { class: "stack" },
-      section("Active now", presence),
-      section("Open questions", questions),
-      section("Units", el("div", { class: "table-wrap", id: "units-table" }, el("table", {},
-        el("thead", {}, el("tr", {}, ["Unit", "Status", "Version", "Lock"].map((h) => el("th", {}, h)))), unitsBody), unitsEmpty)),
-      section("Decisions", decisions),
-      section("Team memory", memory))));
+    el("section", { class: "card" }, el("div", { class: "card-head" }, el("h2", {}, "Team feed"), el("span", { class: "live", title: "New activity appears as it happens" }, el("i"), "Live")), feedList),
+    el("aside", { class: "rail" },
+      railPart("Active now", presence),
+      railPart("Open questions", questions),
+      railPart("Decisions", decisions),
+      railPart("Units", el("div", {}, el("div", { class: "table-wrap", id: "units-table" }, el("table", {},
+        el("thead", {}, el("tr", {}, ["Unit", "Status", "Ver."].map((h) => el("th", {}, h)))), unitsBody)), unitsEmpty)),
+      railPart("Team memory", memory))));
 
   function setHeader(summary) {
-    shell.setHeader({ title: "Feed", subtitle: summary, actions: [el("label", { class: "muted", style: "display:flex;gap:8px;align-items:center" }, "Project", select)] });
+    shell.setHeader({ title: ws.name, subtitle: summary, actions: [el("label", {}, "Project", select)] });
   }
 
   function describe(e) {
@@ -93,7 +94,7 @@
     const mine = e.author_id === user.id;
     const name = mine ? "you" : handles.get(e.author_id) ?? "someone";
     const cls = [(e.mentions ?? []).includes(myHandle) ? "mention" : "", fresh ? "new" : ""].join(" ").trim();
-    return el("li", { class: cls || null, style: fresh ? null : `--i:${Math.min(i, 8)}` }, avatar(mine ? user.email : name),
+    return el("li", { class: [cls, fresh ? "" : "enter"].join(" ").trim() || null, style: `--c:${personColor(mine ? user.email : name)};--i:${Math.min(i, 10)}` }, avatar(mine ? user.email : name),
       el("div", { class: "body" }, el("span", { class: "who" }, name), " ", describe(e)),
       el("span", { class: "when", title: e.created_at }, ago(e.created_at)));
   }
@@ -124,9 +125,9 @@
     document.getElementById("units-table").hidden = unitRows.length === 0;
     unitsBody.replaceChildren(...unitRows.map((u) => el("tr", {},
       el("td", { class: "ref" }, el("button", { type: "button", onclick: () => openUnit(u) }, `${u.collection}/${u.key}`)),
-      el("td", {}, el("span", { class: "badge" }, u.status)), el("td", { class: "num" }, `v${u.current_version}`),
       el("td", {}, u.lock_holder && u.lock_expires_at > now
-        ? el("span", { class: "badge warn" }, `${handles.get(u.lock_holder) ?? "?"} editing`) : ""))));
+        ? el("span", { class: "badge warn" }, `${handles.get(u.lock_holder) ?? "?"} editing`) : el("span", { class: "badge" }, u.status)),
+      el("td", { class: "num" }, `v${u.current_version}`))));
 
     const active = sessions.data ?? [];
     presence.replaceChildren(active.length
@@ -135,15 +136,16 @@
           return el("div", { class: "cell-person" }, el("span", { class: "avatar-live" }, avatar(s.user_id === user.id ? user.email : name)),
             el("div", {}, el("b", {}, name), el("span", {}, `${s.client}${s.title ? ` · ${s.title}` : ""} · ${ago(s.last_seen_at)}`)));
         }))
-      : el("p", { class: "muted", style: "margin:0" }, "Nobody active in the last 15 minutes."));
+      : el("p", { class: "muted", style: "margin:0" }, "Nobody has been active in the last 15 minutes."));
 
     const qs = (recs.data ?? []).filter((r) => r.type === "question" && r.status === "open");
     const ds = (recs.data ?? []).filter((r) => r.type === "decision").slice(0, 8);
-    questions.replaceChildren(...(qs.length ? qs.map((r) => el("li", {}, el("span", { class: "mono muted" }, recRef(r)), r.title)) : [none("Nothing open. Good.")]));
-    decisions.replaceChildren(...(ds.length ? ds.map((r) => el("li", {}, el("span", { class: "mono muted" }, recRef(r)), el("span", { style: "flex:1" }, r.title),
+    questions.replaceChildren(...(qs.length ? qs.map((r) => el("li", {}, el("span", { class: "badge" }, recRef(r)), r.title)) : [none("Nothing open right now.")]));
+    decisions.replaceChildren(...(ds.length ? ds.map((r) => el("li", {}, el("span", { class: "badge" }, recRef(r)), el("span", { style: "flex:1" }, r.title),
       el("span", { class: `badge ${r.status === "accepted" ? "ok" : ""}` }, r.status))) : [none("None yet.")]));
     memory.textContent = mem.data?.summary ?? "No summary yet. Claude writes one once the feed gets long.";
-    setHeader(`${active.length} active now · ${qs.length} open question${qs.length === 1 ? "" : "s"} · ${unitRows.length} unit${unitRows.length === 1 ? "" : "s"}`);
+    const people = active.length === 0 ? "Nobody is active right now" : `${active.length} ${active.length === 1 ? "person is" : "people are"} active right now`;
+    setHeader(`${people}, with ${qs.length === 0 ? "no open questions" : `${qs.length} open question${qs.length === 1 ? "" : "s"}`}.`);
   }
 
   async function load() {
@@ -154,7 +156,7 @@
       .neq("kind", "presence").order("id", { ascending: false }).limit(60);
     feedList.replaceChildren(...(events ?? []).map((e, i) => feedItem(e, false, i)));
     if (!events?.length) feedList.replaceChildren(el("li", {}, el("div", { class: "empty", style: "width:100%" }, emptyMark("feed"),
-      el("h3", {}, "Nothing yet"), el("p", {}, "When a teammate or their Claude does something, it shows up here instantly."))));
+      el("h3", {}, "Quiet so far"), el("p", {}, "When a teammate or their Claude asks, edits or decides something, it lands here the moment it happens."))));
     await refreshSide();
 
     if (channel) await sb.removeChannel(channel);
