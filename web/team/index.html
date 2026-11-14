@@ -16,7 +16,7 @@
 <script type="module">
   // Team management: people, projects, invitations and defaults. Everything goes through the
   // database functions, so the page can only do what the signed-in person is allowed to do.
-  import { PRODUCT, appShell, avatar, callFunction, command, el, emptyMark, icon, requireSignIn, sb, setCommands, transition } from "../app.js";
+  import { PRODUCT, appShell, avatar, callFunction, command, dropdown, el, emailTokens, emptyMark, icon, requireSignIn, sb, setCommands, transition } from "../app.js";
 
   const main = document.getElementById("main");
   const user = await requireSignIn(main, { title: "Sign in to manage your team" });
@@ -56,8 +56,8 @@
   }
 
   const teamPicker = () => teams.length > 1
-    ? el("select", { "aria-label": "Team", onchange: (e) => { history.replaceState(null, "", `?t=${e.target.value}${location.hash}`); loadTeams().then(render); } },
-        teams.map((t) => el("option", { value: t.slug, selected: t.id === team?.id }, t.name)))
+    ? dropdown({ label: "Team", value: team?.slug, options: teams.map((t) => ({ value: t.slug, label: t.name })),
+        onChange: (v) => { history.replaceState(null, "", `?t=${v}${location.hash}`); loadTeams().then(render); } })
     : null;
 
   const roleBadge = (r) => el("span", { class: `badge ${r === "owner" ? "accent" : ""}` }, r);
@@ -88,25 +88,24 @@
     const rows = ov.roster.map((p) => {
       const me = p.user_id === user.id;
       const roleCell = isOwner && !me
-        ? el("select", { class: "role", "aria-label": `Team role for ${p.email}`, onchange: async (e) => {
-            if (await run(() => rpc("set_team_member_role", { p_team: team.id, p_user: p.user_id, p_role: e.target.value }))) say("Role updated."); else render(); } },
-            ["owner", "admin", "member"].map((r) => el("option", { value: r, selected: r === p.role }, r)))
+        ? dropdown({ variant: "pill", label: `Team role for ${p.email}`, value: p.role,
+            options: [{ value: "owner", label: "Owner" }, { value: "admin", label: "Admin" }, { value: "member", label: "Member" }],
+            onChange: async (v) => { if (await run(() => rpc("set_team_member_role", { p_team: team.id, p_user: p.user_id, p_role: v }))) say("Role updated."); else render(); } })
         : roleBadge(p.role);
       const have = new Set(p.projects.map((x) => x.workspace_id));
       const chips = p.projects.map((x) => {
         const pname = projectName.get(x.workspace_id)?.name ?? "project";
         return el("span", { class: "chip" }, pname,
-          x.role === "owner" ? el("span", { class: "badge accent", style: "margin-left:6px" }, "owner") : el("select", { "aria-label": `${p.email} on ${pname}`, onchange: async (e) => {
-            if (await run(() => rpc("grant_project_access", { p_workspace: x.workspace_id, p_user: p.user_id, p_role: e.target.value }))) say("Access updated."); else render(); } },
-            ["editor", "viewer"].map((r) => el("option", { value: r, selected: r === x.role }, r))),
+          x.role === "owner" ? el("span", { class: "badge accent", style: "margin-left:6px" }, "owner") : dropdown({ variant: "chip", label: `${p.email} on ${pname}`, value: x.role,
+            options: [{ value: "editor", label: "editor" }, { value: "viewer", label: "viewer" }],
+            onChange: async (v) => { if (await run(() => rpc("grant_project_access", { p_workspace: x.workspace_id, p_user: p.user_id, p_role: v }))) say("Access updated."); else render(); } }),
           x.role === "owner" ? null : el("button", { type: "button", class: "btn-ghost x", "aria-label": `Remove ${p.email} from ${pname}`, title: "Remove access", onclick: async () => {
             if (await run(() => rpc("revoke_project_access", { p_workspace: x.workspace_id, p_user: p.user_id }))) { say("Access removed."); render(); } } }, icon("x")));
       });
       const addable = ov.projects.filter((pr) => !have.has(pr.id));
-      const add = addable.length ? el("select", { class: "quiet", "aria-label": `Add ${p.email} to a project`, onchange: async (e) => {
-          if (!e.target.value) return;
-          if (await run(() => rpc("grant_project_access", { p_workspace: e.target.value, p_user: p.user_id, p_role: "editor" }))) { say("Access added."); render(); } } },
-        el("option", { value: "" }, "Add to project"), addable.map((pr) => el("option", { value: pr.id }, pr.name))) : null;
+      const add = addable.length ? dropdown({ variant: "quiet", label: `Add ${p.email} to a project`, placeholder: "Add to project",
+          options: addable.map((pr) => ({ value: pr.id, label: pr.name, hint: "as editor" })),
+          onChange: async (v) => { if (await run(() => rpc("grant_project_access", { p_workspace: v, p_user: p.user_id, p_role: "editor" }))) { say("Access added."); render(); } } }) : null;
       const canRemove = me || myRole === "owner" || (myRole === "admin" && p.role === "member");
       return el("tr", {},
         el("td", {}, el("div", { class: "cell-person" }, avatar(p.email), el("div", {}, el("b", {}, p.email), me ? el("span", {}, "You") : null))),
@@ -122,12 +121,12 @@
 
   // ───────── invite ─────────
   function invitePanelCard(ov) {
-    const emails = el("textarea", { placeholder: "priya@company.com, sam@company.com", "aria-label": "Email addresses", required: true });
-    const role = el("select", { "aria-label": "Team role for the invitees" }, el("option", { value: "member" }, "Member"),
-      myRole === "owner" ? el("option", { value: "admin" }, "Admin") : null);
+    const emails = emailTokens({ placeholder: "Type an email and press Enter" });
+    const role = dropdown({ label: "Team role for the invitees", value: "member",
+      options: [{ value: "member", label: "Member", hint: "uses the projects they're given" }, ...(myRole === "owner" ? [{ value: "admin", label: "Admin", hint: "can invite and manage access" }] : [])] });
     const checks = ov.projects.map((p) => {
       const box = el("input", { type: "checkbox", "aria-label": `Give access to ${p.name}`, checked: team.new_member_access === "all_projects" });
-      const level = el("select", { "aria-label": `Role on ${p.name}` }, el("option", { value: "editor" }, "Editor"), el("option", { value: "viewer" }, "Viewer"));
+      const level = dropdown({ variant: "pill", label: `Role on ${p.name}`, value: "editor", options: [{ value: "editor", label: "Editor" }, { value: "viewer", label: "Viewer" }] });
       return { p, box, level, li: el("li", {}, box, el("span", {}, p.name), level) };
     });
     const result = el("ul", { class: "plain", style: "margin-top:12px" });
@@ -137,8 +136,10 @@
         el("button", { type: "button", class: "btn-ghost btn-sm", "aria-label": "Close", onclick: () => { invitePanel = false; render(); } }, icon("x"))),
       el("form", { class: "card-body", onsubmit: async (e) => {
         e.preventDefault();
-        const list = [...new Set(emails.value.split(/[\s,;]+/).map((x) => x.trim().toLowerCase()).filter(Boolean))];
-        if (!list.length) return;
+        const list = emails.values();
+        const bad = emails.invalid();
+        if (bad.length) { say(`Fix or remove ${bad.join(", ")} before sending.`, true); return; }
+        if (!list.length) { say("Add at least one email address.", true); emails.focus(); return; }
         send.disabled = true; send.textContent = "Sending…";
         try {
           const out = await callFunction("invite-members", { team: team.id, emails: list, team_role: role.value,
@@ -151,8 +152,8 @@
             : `${out.invited.length} invitation${out.invited.length === 1 ? "" : "s"} sent.`, failed.length > 0);
         } catch (err) { say(err.message, true); send.disabled = false; send.replaceChildren(icon("send"), "Send invitations"); }
       } },
-        el("label", { class: "field" }, "Email addresses", el("span", { class: "hint" }, "Separate with commas, spaces or new lines. Each person gets an email with a link."), emails),
-        el("label", { class: "field", style: "max-width:220px" }, "Team role", role),
+        el("div", { class: "field-block" }, el("div", { class: "field-label" }, "Email addresses"), el("p", { class: "hint" }, "Press Enter after each address, or paste a list. Each person gets an email with a link."), emails.el),
+        el("div", { class: "field-block" }, el("div", { class: "field-label" }, "Team role"), role),
         ov.projects.length
           ? el("fieldset", {}, el("legend", {}, "Project access"), el("ul", { class: "checks" }, checks.map((c) => c.li)))
           : el("p", { class: "callout" }, "This team has no projects yet, so invitees will only join the team. Add a project first to give access on invitation."),

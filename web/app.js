@@ -40,6 +40,7 @@ const ICONS = {
   lock: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
   send: '<path d="M21 3 10 14M21 3l-7 18-4-7-7-4z"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
+  chevron: '<path d="m7 10 5 5 5-5"/>',
   refresh: '<path d="M20 11a8 8 0 0 0-14.5-4M4 4v4h4M4 13a8 8 0 0 0 14.5 4M20 20v-4h-4"/>',
 };
 export function icon(name) {
@@ -143,6 +144,107 @@ export function weave(names, { you } = {}) {
   // Loops pause while the weave is off-screen.
   new IntersectionObserver(([e]) => { e.isIntersecting ? svg.unpauseAnimations?.() : svg.pauseAnimations?.(); }).observe(svg);
   return el("div", { class: "weave" }, svg);
+}
+
+// ───────── dropdown: replaces the native <select> everywhere ─────────
+// A button that opens a listbox in the page's own style. The menu is fixed-positioned so tables
+// and scroll containers never clip it. Keyboard: arrows, Enter/Space, Esc, type-ahead.
+export function dropdown({ options, value, onChange, label, variant = "", placeholder }) {
+  let current = value ?? null;
+  const text = el("span", { class: "dd-value" });
+  const btn = el("button", { type: "button", class: `dd ${variant}`.trim(), "aria-haspopup": "listbox", "aria-expanded": "false", "aria-label": label }, text, icon("chevron"));
+  const wrap = el("span", { class: "dd-wrap" }, btn);
+  let menu = null, active = 0;
+  const paint = () => {
+    const o = options.find((x) => x.value === current);
+    text.textContent = o?.label ?? placeholder ?? label;
+    btn.classList.toggle("is-placeholder", !o);
+  };
+  const outside = (e) => { if (menu && !menu.contains(e.target) && !btn.contains(e.target)) close(); };
+  const onScroll = (e) => { if (menu && !menu.contains(e.target)) close(); };
+  function close() {
+    if (!menu) return;
+    menu.remove(); menu = null;
+    btn.setAttribute("aria-expanded", "false");
+    removeEventListener("pointerdown", outside, true); removeEventListener("scroll", onScroll, true); removeEventListener("resize", close);
+  }
+  function choose(o) {
+    close(); btn.focus();
+    if (o.value !== current) { if (!placeholder) current = o.value; paint(); onChange?.(o.value); }
+  }
+  const mark = () => [...menu.children].forEach((c, i) => { c.classList.toggle("active", i === active); if (i === active) c.scrollIntoView({ block: "nearest" }); });
+  function open() {
+    const r = btn.getBoundingClientRect();
+    menu = el("div", { class: "dd-menu", role: "listbox", "aria-label": label, tabindex: "-1" },
+      options.map((o, i) => el("div", { role: "option", class: "dd-opt", "aria-selected": String(o.value === current),
+        onclick: () => choose(o), onpointermove: () => { if (active !== i) { active = i; mark(); } } },
+        el("span", {}, o.label), o.hint ? el("small", {}, o.hint) : null, o.value === current ? icon("check") : null)));
+    document.body.append(menu);
+    menu.style.minWidth = `${Math.max(r.width, 160)}px`;
+    const mh = menu.offsetHeight;
+    menu.style.left = `${Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8))}px`;
+    menu.style.top = `${innerHeight - r.bottom < mh + 12 && r.top > mh + 12 ? r.top - mh - 6 : r.bottom + 6}px`;
+    active = Math.max(0, options.findIndex((o) => o.value === current));
+    mark(); menu.focus();
+    menu.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowDown") { e.preventDefault(); active = Math.min(options.length - 1, active + 1); mark(); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); active = Math.max(0, active - 1); mark(); }
+      else if (e.key === "Enter" || e.key === " ") { e.preventDefault(); choose(options[active]); }
+      else if (e.key === "Escape" || e.key === "Tab") { e.preventDefault(); e.stopPropagation(); close(); btn.focus(); }
+      else if (e.key.length === 1) {
+        const i = options.findIndex((o) => o.label.toLowerCase().startsWith(e.key.toLowerCase()));
+        if (i >= 0) { active = i; mark(); }
+      }
+    });
+    btn.setAttribute("aria-expanded", "true");
+    addEventListener("pointerdown", outside, true); addEventListener("scroll", onScroll, true); addEventListener("resize", close);
+  }
+  btn.addEventListener("click", () => (menu ? close() : open()));
+  btn.addEventListener("keydown", (e) => { if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); if (!menu) open(); } });
+  paint();
+  Object.defineProperty(wrap, "value", { get: () => current, set: (v) => { current = v; paint(); } });
+  wrap.choose = (v) => { const o = options.find((x) => x.value === v); if (o) { current = null; choose(o); } };
+  return wrap;
+}
+
+// ───────── email tokens: type an address, press Enter, it becomes a chip ─────────
+const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+export function emailTokens({ placeholder = "name@company.com", label = "Email addresses" } = {}) {
+  const list = [];
+  const input = el("input", { type: "email", class: "tokens-input", placeholder, "aria-label": label, autocomplete: "off", spellcheck: "false" });
+  const box = el("div", { class: "tokens", onclick: (e) => { if (e.target === box) input.focus(); } });
+  box.append(input);
+  // Redraw the chips in front of the input without ever detaching it, so typing keeps its focus.
+  const paint = () => {
+    box.querySelectorAll(".token").forEach((t) => t.remove());
+    for (const e of list) {
+      box.insertBefore(el("span", { class: `token ${EMAIL.test(e) ? "" : "bad"}`.trim(), title: EMAIL.test(e) ? null : "This doesn't look like an email address" },
+        avatar(e, "sm"), el("span", {}, e),
+        el("button", { type: "button", class: "token-x", "aria-label": `Remove ${e}`, onclick: () => { list.splice(list.indexOf(e), 1); paint(); input.focus(); } }, icon("x"))), input);
+    }
+    input.placeholder = list.length ? "Add another" : placeholder;
+  };
+  const add = (raw) => {
+    for (const part of String(raw).split(/[\s,;]+/)) {
+      const e = part.trim().toLowerCase();
+      if (e && !list.includes(e)) list.push(e);
+    }
+    input.value = ""; paint();
+  };
+  input.addEventListener("keydown", (e) => {
+    if ((e.key === "Enter" || e.key === "," || e.key === " " || (e.key === "Tab" && input.value.trim())) && input.value.trim()) { e.preventDefault(); add(input.value); }
+    else if (e.key === "Enter") e.preventDefault();
+    else if (e.key === "Backspace" && !input.value && list.length) { list.pop(); paint(); }
+  });
+  input.addEventListener("paste", (e) => { e.preventDefault(); add(e.clipboardData.getData("text")); });
+  input.addEventListener("blur", () => { if (input.value.trim()) add(input.value); });
+  paint();
+  return {
+    el: box,
+    values() { if (input.value.trim()) add(input.value); return list.filter((e) => EMAIL.test(e)); },
+    invalid() { return list.filter((e) => !EMAIL.test(e)); },
+    focus() { input.focus(); },
+  };
 }
 
 // ───────── command palette (⌘K) ─────────

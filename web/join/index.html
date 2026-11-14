@@ -16,7 +16,7 @@
 <script type="module">
   // Where an emailed invitation lands: sign in, apply the invitation, then walk through
   // connecting Claude. The invitation is matched to the verified email, never to a code.
-  import { avatar, brand, cfg, command, el, emptyMark, icon, requireSignIn, sb, signOut, toggleTheme, weave } from "../app.js";
+  import { avatar, brand, cfg, command, dropdown, el, emptyMark, icon, requireSignIn, sb, signOut, toggleTheme, weave } from "../app.js";
 
   const main = document.getElementById("main");
 
@@ -85,9 +85,9 @@
   let poll;
 
   const picker = projects.length > 1
-    ? el("label", { class: "field", style: "margin:0 0 4px" }, "Project to connect",
-        el("select", { style: "max-width:320px", onchange: (e) => { chosen = projects.find((p) => p.slug === e.target.value); renderSteps(); } },
-          projects.map((p) => el("option", { value: p.slug, selected: p.slug === chosen.slug }, p.name))))
+    ? el("div", { class: "field-block", style: "margin:0" }, el("div", { class: "field-label" }, "Project to connect"),
+        dropdown({ label: "Project to connect", value: chosen.slug, options: projects.map((p) => ({ value: p.slug, label: p.name })),
+          onChange: (v) => { chosen = projects.find((p) => p.slug === v); renderSteps(); } }))
     : null;
 
   function renderSteps() {

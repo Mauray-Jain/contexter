@@ -18,7 +18,7 @@
 <script type="module">
   // Live team feed: what teammates and their Claudes did, who is active, units and reasoning,
   // updated through Supabase Realtime.
-  import { ago, appShell, avatar, el, emptyMark, personColor, requireSignIn, sb, setCommands, transition } from "./app.js";
+  import { ago, appShell, avatar, dropdown, el, emptyMark, personColor, requireSignIn, sb, setCommands, transition } from "./app.js";
 
   const main = document.getElementById("main");
   const user = await requireSignIn(main);
@@ -50,11 +50,12 @@
   let myHandle = "";
   let channel;
 
-  const select = el("select", { "aria-label": "Project", onchange: (e) => {
-    ws = memberships.find((m) => m.workspaces.slug === e.target.value).workspaces;
-    history.replaceState(null, "", `?w=${ws.slug}`);
-    transition(() => { load(); });
-  } }, memberships.map((m) => el("option", { value: m.workspaces.slug, selected: m.workspaces.id === ws.id }, m.workspaces.name)));
+  const select = dropdown({ label: "Project", value: ws.slug, options: memberships.map((m) => ({ value: m.workspaces.slug, label: m.workspaces.name })),
+    onChange: (v) => {
+      ws = memberships.find((m) => m.workspaces.slug === v).workspaces;
+      history.replaceState(null, "", `?w=${ws.slug}`);
+      transition(() => { load(); });
+    } });
 
   // The feed is the page; everything else lives in one quiet rail beside it.
   const railPart = (title, body) => el("section", {}, el("h2", {}, title), el("div", { class: "rail-body" }, body));
@@ -69,7 +70,7 @@
       railPart("Team memory", memory))));
 
   function setHeader(summary) {
-    shell.setHeader({ title: ws.name, subtitle: summary, actions: [el("label", {}, "Project", select)] });
+    shell.setHeader({ title: ws.name, subtitle: summary, actions: [memberships.length > 1 ? select : null] });
   }
 
   function describe(e) {
@@ -173,7 +174,7 @@
   }
 
   setCommands(memberships.map((m) => ({ label: `Switch to ${m.workspaces.name}`, icon: "folder", run: () => {
-    select.value = m.workspaces.slug; select.dispatchEvent(new Event("change")); } })));
+    select.choose(m.workspaces.slug); } })));
   setHeader("Loading…");
   await load();
   setInterval(refreshSide, 60_000); // keeps "x minutes ago" and presence honest
