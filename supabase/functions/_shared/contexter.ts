@@ -185,7 +185,7 @@ export function describeEvent(e: Event, ctx: Pick<Ctx, "handles" | "userId">): s
         : `released ${unit}`;
       break;
     case "mention": what = `to ${(e.mentions ?? []).map((h) => `@${h}`).join(" ")}: "${truncate(p.text ?? "", 400)}"`; break;
-    case "member": what = `${p.action} the workspace`; break;
+    case "member": what = p.action === "became owner" ? `made ${p.handle} the owner` : `${p.action} the workspace`; break;
     case "presence": what = p.action === "started" ? `opened a ${p.client} session` : `closed their ${p.client} session`; break;
     case "compaction": what = `updated the shared memory (v${p.version})`; break;
     case "run": {

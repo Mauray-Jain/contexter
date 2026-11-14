@@ -84,7 +84,7 @@
       case "status": return p.action === "created" ? `created ${unit}` : `moved ${unit} ${p.from} → ${p.to}`;
       case "lock": return p.action === "claimed" ? `is editing ${unit}` : p.action === "broken" ? `broke the lock on ${unit}` : `released ${unit}`;
       case "mention": return `to ${(e.mentions ?? []).map((h) => "@" + h).join(" ")}: “${p.text}”`;
-      case "member": return `${p.action} the project`;
+      case "member": return p.action === "became owner" ? `made ${p.handle} the project owner` : `${p.action} the project`;
       case "presence": return p.action === "started" ? `opened a ${p.client} session` : `closed their ${p.client} session`;
       case "compaction": return `updated the team memory (v${p.version})`;
       default: return e.kind;

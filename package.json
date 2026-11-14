@@ -16,13 +16,14 @@
     "db:keys": "node scripts/gen-keys.mjs",
     "test:mcp": "tsx scripts/mcp-test.ts",
     "test:invite": "tsx scripts/invite-test.ts",
+    "test:projects": "tsx scripts/projects-test.ts",
     "build": "node scripts/build.mjs",
     "test:hooks": "tsx scripts/hooks-test.ts",
     "web": "node scripts/serve-web.mjs",
     "test:oauth": "tsx scripts/oauth-test.ts",
     "seed": "tsx scripts/seed-demo.ts",
     "test:cli": "tsx scripts/cli-test.ts",
-    "test": "npm run build && supabase test db && npm run test:mcp && npm run test:invite && npm run test:oauth && npm run test:hooks && npm run test:cli && npm run test:e2e"
+    "test": "npm run build && supabase test db && npm run test:mcp && npm run test:invite && npm run test:projects && npm run test:oauth && npm run test:hooks && npm run test:cli && npm run test:e2e"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "^2.3.1",

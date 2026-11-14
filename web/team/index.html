@@ -18,9 +18,13 @@
   // database functions, so the page can only do what the signed-in person is allowed to do.
   import { PRODUCT, appShell, avatar, callFunction, command, dropdown, el, emailTokens, emptyMark, icon, inlineConfirm, requireSignIn, sb, setCommands, transition } from "../app.js";
 
+  const TEMPLATE_LABELS = { blank: "Blank", "research-paper": "Research paper", software: "Software", book: "Book", spec: "Spec", "knowledge-base": "Knowledge base" };
+
   const main = document.getElementById("main");
   const user = await requireSignIn(main, { title: "Sign in to manage your team" });
   const shell = appShell(main, user, "people");
+  const { data: tplRows } = await sb.from("templates").select("name, description").order("position");
+  const templates = (tplRows ?? []).map((t) => ({ ...t, label: TEMPLATE_LABELS[t.name] ?? t.name }));
 
   const slugify = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48);
   const flash = el("p", { role: "status", "aria-live": "polite", class: "muted", style: "margin:0 0 12px", hidden: true });
@@ -187,23 +191,70 @@
 
   // ───────── projects ─────────
   function projectsView(ov) {
-    const slug = el("input", { placeholder: "new-project", "aria-label": "Project short name" });
-    const cmdHost = el("div");
-    const show = () => cmdHost.replaceChildren(command(`contexter init ${slugify(slug.value) || "new-project"} --handle <your-name> --team ${team.slug} --template blank`));
+    const emailOf = new Map(ov.roster.map((r) => [r.user_id, r.email]));
+    const ownerOf = (pid) => ov.roster.find((r) => r.projects.some((x) => x.workspace_id === pid && x.role === "owner"));
+
+    // Owner: a picker of team members; choosing someone asks to confirm in place.
+    const ownerCell = (p) => {
+      const cell = el("div", { class: "owner-cell" });
+      const owner = ownerOf(p.id);
+      const paint = () => cell.replaceChildren(dropdown({
+        variant: "pill", label: `Owner of ${p.name}`, value: owner?.user_id ?? null, placeholder: "No owner",
+        options: ov.roster.map((r) => ({ value: r.user_id, label: r.email === user.email ? `${r.email} (you)` : r.email })),
+        onChange: (uid) => {
+          if (uid === owner?.user_id) return;
+          cell.replaceChildren(inlineConfirm({
+            open: true, danger: false, prompt: `Make ${emailOf.get(uid)} the owner?`, confirmLabel: "Transfer", busyLabel: "Transferring…",
+            action: () => rpc("transfer_project_ownership", { p_workspace: p.id, p_user: uid }),
+            onCancel: paint,
+            onDone: () => { say(`${emailOf.get(uid)} now owns ${p.name}.`); render(); },
+          }));
+        },
+      }));
+      paint();
+      return cell;
+    };
+
     const list = ov.projects.length
       ? el("section", { class: "card" }, el("div", { class: "table-wrap" }, el("table", {},
-          el("thead", {}, el("tr", {}, ["Project", "Template", "People", ""].map((h) => el("th", {}, h)))),
+          el("thead", {}, el("tr", {}, ["Project", "Owner", "Template", "People", ""].map((h) => el("th", {}, h)))),
           el("tbody", {}, ov.projects.map((p) => el("tr", {},
-            el("td", {}, el("b", { style: "font-weight:500" }, p.name), el("div", { class: "muted mono" }, p.slug)),
-            el("td", {}, el("span", { class: "badge" }, p.template)), el("td", { class: "num" }, String(p.members)),
+            el("td", {}, el("b", { style: "font-weight:600" }, p.name), el("div", { class: "muted", style: "font-size:.8125rem" }, p.slug)),
+            el("td", {}, ownerCell(p)),
+            el("td", {}, el("span", { class: "pill" }, templateName(p.template))), el("td", { class: "num" }, String(p.members)),
             el("td", {}, el("div", { class: "actions" }, el("a", { class: "btn btn-sm", href: `../?w=${p.slug}` }, "Open feed")))))))))
-      : el("section", { class: "card" }, el("div", { class: "empty" }, emptyMark("folder"),
-          el("h3", {}, "No projects yet"), el("p", {}, "A project is a shared workspace, like a paper or a codebase. Create the first one below.")));
-    const add = el("section", { class: "card", style: "margin-top:16px" }, el("div", { class: "card-head" }, el("h2", {}, "Add a project")),
-      el("div", { class: "card-body" }, el("p", { class: "muted" }, "Projects start from a template, so they're created from the terminal. This command puts the new project in this team:"),
-        el("div", { class: "row" }, slug, el("button", { type: "button", onclick: show }, "Show command")), cmdHost));
-    show();
-    return el("div", {}, list, add);
+      : null;
+    return el("div", { class: "stack" }, newProjectCard(!ov.projects.length), list);
+  }
+
+  // New project: name, short name (derived until edited), template with its description.
+  const templateName = (t) => (templates.find((x) => x.name === t)?.label ?? t);
+  function newProjectCard(first) {
+    const name = el("input", { required: true, placeholder: "Retrieval paper", "aria-label": "Project name", maxlength: 200 });
+    const slug = el("input", { required: true, placeholder: "retrieval-paper", "aria-label": "Short name", pattern: "[a-z0-9][a-z0-9\\-]{1,48}" });
+    let edited = false;
+    slug.addEventListener("input", () => (edited = true));
+    name.addEventListener("input", () => { if (!edited) slug.value = slugify(name.value); });
+    const tpl = dropdown({ label: "Template", value: "research-paper",
+      options: templates.map((t) => ({ value: t.name, label: t.label, hint: t.description })) });
+    const create = el("button", { type: "submit", class: "primary" }, icon("plus"), "Create project");
+    return el("section", { class: "card" },
+      el("div", { class: "card-head" }, el("h2", {}, first ? "Create your first project" : "New project")),
+      el("form", { class: "card-body new-project", onsubmit: async (e) => {
+        e.preventDefault();
+        create.disabled = true;
+        const ok = await run(() => rpc("create_team_project", { p_team: team.id, p_slug: slug.value.trim(), p_name: name.value.trim(), p_template: tpl.value }));
+        create.disabled = false;
+        if (ok) { say(`${name.value.trim()} is ready. ${team.new_member_access === "all_projects" ? "Everyone on the team can open it." : "Add people to it from the People page."}`); render(); }
+      } },
+        el("div", { class: "grid-3" },
+          el("label", { class: "field" }, "Project name", name),
+          el("label", { class: "field" }, "Short name", slug),
+          el("div", { class: "field-block" }, el("div", { class: "field-label" }, "Template"), tpl)),
+        el("div", { class: "form-foot" },
+          el("p", { class: "muted", style: "margin:0" }, "You'll own it. Units from the template are created for you."), create),
+        el("details", { class: "cli-alt" }, el("summary", {}, "Prefer the terminal?"),
+          command(`contexter init <short-name> --handle <your-name> --team ${team.slug} --template research-paper`))));
   }
 
   // ───────── settings ─────────

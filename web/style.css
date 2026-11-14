@@ -360,7 +360,7 @@ ol.steps p { color: var(--muted); margin-bottom: 8px; }
 /* ───────── dropdown ───────── */
 .dd-wrap { display: inline-flex; max-width: 100%; }
 .dd {
-  justify-content: space-between; gap: 10px; min-width: 150px; max-width: 100%; padding: 7px 10px 7px 13px; font-weight: 550;
+  justify-content: space-between; gap: 10px; min-width: 150px; max-width: 100%; min-height: 40px; padding: 7px 10px 7px 13px; font-weight: 550;
   background: var(--surface); box-shadow: inset 0 0 0 1px var(--border-strong); border-radius: 10px;
 }
 .dd .dd-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -436,3 +436,12 @@ td .btn-sm { font-weight: 550; }
 .spinner { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--border-strong); border-top-color: var(--muted); animation: spin .7s linear infinite; }
 @keyframes spin { to { rotate: 360deg; } }
 tr.fold, li.fold { transition-property: opacity, translate; transition-duration: .25s; transition-timing-function: ease-out; opacity: 0; translate: -8px 0; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 16px; align-items: start; }
+.grid-3 .field-block .dd-wrap, .grid-3 .field-block .dd { width: 100%; }
+.grid-3 input { width: 100%; }
+@media (max-width: 760px) { .grid-3 { grid-template-columns: minmax(0, 1fr); } }
+.form-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.cli-alt { margin-top: 14px; }
+.cli-alt summary { cursor: pointer; color: var(--muted); font-size: .875rem; width: max-content; }
+.owner-cell { display: flex; align-items: center; min-height: 30px; }
+.owner-cell .dd.pill { max-width: 240px; }

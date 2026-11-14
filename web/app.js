@@ -210,14 +210,14 @@ export function dropdown({ options, value, onChange, label, variant = "", placeh
 // ───────── inline confirm (pattern adapted from ObsidianUI's Active Sessions, MIT) ─────────
 // The button turns into "prompt · Cancel · Confirm" in place; while the request runs the row shows a
 // spinner; on success the row folds away; on failure the error shows in place with Try again.
-export function inlineConfirm({ label, prompt, confirmLabel, busyLabel = "Working…", action, onDone }) {
+export function inlineConfirm({ label, prompt, confirmLabel, busyLabel = "Working…", action, onDone, open = false, onCancel, danger = true }) {
   const host = el("span", { class: "confirm" });
-  const idle = () => host.replaceChildren(el("button", { type: "button", class: "btn-ghost btn-sm btn-danger", onclick: ask }, label));
+  const idle = () => (onCancel ? onCancel() : host.replaceChildren(el("button", { type: "button", class: `btn-ghost btn-sm ${danger ? "btn-danger" : ""}`, onclick: ask }, label)));
   function ask() {
-    const go = el("button", { type: "button", class: "btn-sm danger-solid", onclick: exec }, confirmLabel);
+    const go = el("button", { type: "button", class: `btn-sm ${danger ? "danger-solid" : "primary"}`, onclick: exec }, confirmLabel);
     host.replaceChildren(el("span", { class: "confirm-q" }, prompt),
       el("button", { type: "button", class: "btn-ghost btn-sm", onclick: () => { idle(); host.querySelector("button")?.focus(); } }, "Cancel"), go);
-    go.focus();
+    queueMicrotask(() => go.focus());
   }
   async function exec() {
     host.replaceChildren(el("span", { class: "spinner", "aria-hidden": "true" }), el("span", { class: "confirm-q", role: "status" }, busyLabel));
@@ -232,7 +232,7 @@ export function inlineConfirm({ label, prompt, confirmLabel, busyLabel = "Workin
     }
   }
   host.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); idle(); host.querySelector("button")?.focus(); } });
-  idle();
+  open ? ask() : idle();
   return host;
 }
 
