@@ -445,3 +445,11 @@ tr.fold, li.fold { transition-property: opacity, translate; transition-duration:
 .cli-alt summary { cursor: pointer; color: var(--muted); font-size: .875rem; width: max-content; }
 .owner-cell { display: flex; align-items: center; min-height: 30px; }
 .owner-cell .dd.pill { max-width: 240px; }
+
+/* GitHub sign-in: GitHub's own ink and mark, so it reads as GitHub at a glance */
+.icon-fill { fill: currentColor; stroke: none; }
+.btn-github { background: #1F2328; color: #FFFFFF; box-shadow: 0 1px 2px rgb(23 24 28 / .2), inset 0 1px 0 rgb(255 255 255 / .08); gap: 10px; }
+.btn-github .icon { width: 18px; height: 18px; }
+@media (hover: hover) { button.btn-github:not(:disabled):hover { background: #32383F; color: #FFFFFF; box-shadow: 0 1px 2px rgb(23 24 28 / .2); } }
+:root[data-theme="dark"] .btn-github { background: #F2F2EF; color: #1F2328; }
+@media (hover: hover) { :root[data-theme="dark"] button.btn-github:not(:disabled):hover { background: #FFFFFF; color: #1F2328; } }
