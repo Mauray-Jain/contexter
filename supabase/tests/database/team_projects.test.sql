@@ -91,6 +91,21 @@ select lives_ok($$ select public.transfer_project_ownership((select id from publ
 select throws_ok($$ select public.transfer_project_ownership((select id from public.workspaces where slug = 'paper'), '00000000-0000-0000-0000-0000000002a4') $$,
   'P0002', null, 'ownership cannot go to someone outside the team');
 reset role;
+select pg_temp.act_as('00000000-0000-0000-0000-0000000002a2');
+select public.transfer_project_ownership((select id from public.workspaces where slug = 'paper'), '00000000-0000-0000-0000-0000000002a3');
+reset role;
+select pg_temp.act_as('00000000-0000-0000-0000-0000000002a3');
+select throws_like($$ select public.remove_team_member((select id from t), auth.uid()) $$, '%still own paper%',
+  'someone who owns a team project cannot leave until they transfer it');
+reset role;
+create temp table pw as select id from public.workspaces where slug = 'paper';  -- the team owner isn't on 'paper', so look it up here
+grant select on pw to authenticated;
+select pg_temp.act_as('00000000-0000-0000-0000-0000000002a1');
+select throws_like($$ select public.remove_team_member((select id from t), '00000000-0000-0000-0000-0000000002a3') $$, '%transfer ownership first%',
+  'nor can an owner remove them');
+select lives_ok($$ select public.transfer_project_ownership((select id from pw), '00000000-0000-0000-0000-0000000002a2') $$,
+  'a team owner who is not on the project can still move its ownership');
+reset role;
 select pg_temp.act_as('00000000-0000-0000-0000-0000000002a3');
 select lives_ok($$ select public.remove_team_member((select id from t), auth.uid()) $$, 'after the transfer, the former owner can leave cleanly');
 reset role;

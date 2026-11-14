@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-import { Command, Option } from "commander";
+import { Argument, Command, Option } from "commander";
 import { check, CliError, getClient, requireUser, requireWorkspace } from "./client.ts";
 import { loadConfig, saveConfig } from "./config.ts";
 import { loginWithEmail, loginWithGithub } from "./auth.ts";
 import { templates } from "./templates.ts";
+import { acceptInvites, createTeam, handleFromEmail, inviteByEmail, listInvites, listTeams, removeMember, resolveTeam, revokeInvite, setDefault, setRole, showTeam, transferOwnership } from "./team.ts";
 import * as core from "../../../supabase/functions/_shared/contexter.ts";
 import { runHook } from "./hooks.ts";
 import { chatInstructions, installCode, packageSkill, uninstallCode } from "./install.ts";
@@ -49,41 +50,46 @@ program.command("whoami").description("Show the signed-in user and active worksp
 });
 
 program.command("init")
-  .description("Create a workspace and make it active")
+  .description("Create a project and make it active (in a team: --team)")
   .argument("<slug>", "short id, e.g. retrieval-paper")
-  .requiredOption("--handle <handle>", "your name in this workspace, e.g. mauray")
+  .option("--handle <handle>", "your name in this project, e.g. mauray (derived from your email when omitted)")
   .option("--name <name>", "display name (defaults to slug)")
   .addOption(new Option("--template <template>", "starting structure")
     .choices(Object.keys(templates)).default("blank"))
-  .option("--team <slug>", "put the project in one of your teams (you must administer it)")
+  .option("--team <slug>", "create it in one of your teams (you must administer it)")
   .action(async (slug, { handle, name, template, team }) => {
     const sb = getClient();
-    await requireUser(sb);
-    const tpl = templates[template];
-    // Resolve the team first so a typo fails before anything is created.
-    const teamRow = team
-      ? check(await sb.from("teams").select("id").eq("slug", team).single<{ id: string }>())
-      : null;
-    const ws = check(await sb.rpc("create_workspace", {
-      p_slug: slug, p_name: name ?? slug, p_handle: handle, p_template: template, p_manifest: tpl.manifest,
-    }).single<{ id: string; slug: string }>());
-
-    if (tpl.units.length) {
-      check(await sb.from("units").insert(tpl.units.map((u) => ({ ...u, workspace_id: ws.id }))));
+    const user = await requireUser(sb);
+    let ws: { id: string; slug: string };
+    if (team) {
+      // Same path as the web: the server seeds the template and applies the team's defaults.
+      const t = await resolveTeam(sb, team);
+      ws = check(await sb.rpc("create_team_project", { p_team: t.id, p_slug: slug, p_name: name ?? slug, p_template: template })
+        .single<{ id: string; slug: string }>());
+    } else {
+      const tpl = templates[template];
+      ws = check(await sb.rpc("create_workspace", {
+        p_slug: slug, p_name: name ?? slug, p_handle: handle ?? handleFromEmail(user.email ?? "me"), p_template: template, p_manifest: tpl.manifest,
+      }).single<{ id: string; slug: string }>());
+      if (tpl.units.length) check(await sb.from("units").insert(tpl.units.map((u) => ({ ...u, workspace_id: ws.id }))));
     }
-    if (teamRow) check(await sb.rpc("attach_workspace_to_team", { p_workspace: ws.id, p_team: teamRow.id }));
     saveConfig({ activeWorkspace: { id: ws.id, slug: ws.slug } });
-    await core.setActiveWorkspace(sb, (await requireUser(sb)).id, ws.id);
-    console.log(`Created workspace "${ws.slug}" from template ${template} (${tpl.units.length} units). It's now active.`);
-    console.log("Invite teammates with: contexter invite");
+    await core.setActiveWorkspace(sb, user.id, ws.id);
+    console.log(`Created workspace "${ws.slug}" from template ${template} (${templates[template].units.length} units)${team ? ` in team ${team}` : ""}. It's now active.`);
+    console.log(team ? `Invite teammates with: contexter invite name@company.com` : "Invite teammates with: contexter invite");
   });
 
 program.command("invite")
-  .description("Create an invite code for the active workspace (owners only)")
-  .addOption(new Option("--role <role>").choices(["editor", "viewer"]).default("editor"))
-  .option("--uses <n>", "how many people can use it", "1")
-  .option("--days <n>", "days until it expires", "7")
-  .action(async ({ role, uses, days }) => {
+  .description("Invite people by email to the active project's team, or print an invite code when no emails are given")
+  .argument("[emails...]", "email addresses to invite")
+  .option("--team <slug>", "the team to invite to (defaults to the active project's team)")
+  .option("-p, --project <slugs...>", "projects to give access to (defaults to the active project)")
+  .option("--admin", "invite as team admins (team owners only)")
+  .addOption(new Option("--role <role>", "project role (and the code's role)").choices(["editor", "viewer"]).default("editor"))
+  .option("--uses <n>", "code only: how many people can use it", "1")
+  .option("--days <n>", "code only: days until it expires", "7")
+  .action(async (emails: string[], { role, uses, days, team, project, admin }) => {
+    if (emails.length) return inviteByEmail(emails, { team, project, role, admin });
     const sb = getClient();
     await requireUser(sb);
     const ws = requireWorkspace();
@@ -92,22 +98,49 @@ program.command("invite")
       .insert({ workspace_id: ws.id, role, max_uses: Number(uses), expires_at: expires })
       .select("code").single<{ code: string }>());
     console.log(`Invite code (${role}, ${uses} use(s), ${days} days):\n\n  ${inv.code}\n`);
-    console.log(`Teammates run: contexter join ${inv.code} --handle <their-name>`);
+    console.log(`Teammates run: contexter join ${inv.code}`);
+    console.log("Tip: invite by email instead with: contexter invite name@company.com");
   });
 
 program.command("join")
-  .description("Join a workspace with an invite code and make it active")
-  .argument("<code>")
-  .requiredOption("--handle <handle>", "your name in this workspace")
-  .action(async (code, { handle }) => {
+  .description("Accept your pending email invitations, or join with an invite code")
+  .argument("[code]", "an invite code; omit it to accept invitations sent to your email")
+  .option("--handle <handle>", "your name in the project (derived from your email when omitted)")
+  .action(async (code: string | undefined, { handle }) => {
+    if (!code) return acceptInvites();
     const sb = getClient();
-    await requireUser(sb);
-    const ws = check(await sb.rpc("join_workspace", { p_code: code, p_handle: handle })
+    const user = await requireUser(sb);
+    const name = handle ?? handleFromEmail(user.email ?? "me");
+    const ws = check(await sb.rpc("join_workspace", { p_code: code, p_handle: name })
       .single<{ id: string; slug: string }>());
     saveConfig({ activeWorkspace: { id: ws.id, slug: ws.slug } });
-    await core.setActiveWorkspace(sb, (await requireUser(sb)).id, ws.id);
-    console.log(`Joined "${ws.slug}" as ${handle}. It's now active.`);
+    await core.setActiveWorkspace(sb, user.id, ws.id);
+    console.log(`Joined "${ws.slug}" as ${name}. It's now active.`);
   });
+
+const teamCmd = program.command("team").description("Your teams: people, roles, invitations and defaults")
+  .option("--team <slug>", "which team (defaults to the active project's team)")
+  .action(async ({ team }) => showTeam(team));
+teamCmd.command("list").description("Teams you belong to").action(() => listTeams());
+teamCmd.command("show").description("Projects, people and their access, and who is waiting to join").argument("[slug]")
+  .action((slug?: string) => showTeam(slug ?? teamCmd.opts().team));
+teamCmd.command("create").description("Create a team; you become its owner").argument("<slug>").option("--name <name>", "display name")
+  .action((slug: string, { name }) => createTeam(slug, name));
+teamCmd.command("role").description("Change someone's team role (team owners only)").argument("<email>")
+  .addArgument(new Argument("<role>").choices(["owner", "admin", "member"])).option("--team <slug>", "which team")
+  .action((email: string, role: string, o) => setRole(email, role, { team: o.team ?? teamCmd.opts().team }));
+teamCmd.command("remove").description("Remove someone from the team, with the project access the team gave them (your own email leaves)")
+  .argument("<email>").option("--team <slug>", "which team").action((email: string, o) => removeMember(email, { team: o.team ?? teamCmd.opts().team }));
+teamCmd.command("invites").description("Invitations waiting to be accepted").option("--team <slug>", "which team").action((o) => listInvites({ team: o.team ?? teamCmd.opts().team }));
+teamCmd.command("revoke").description("Revoke a pending invitation").argument("<email>").option("--team <slug>", "which team").action((email: string, o) => revokeInvite(email, { team: o.team ?? teamCmd.opts().team }));
+teamCmd.command("default").description("What new members get: every project (all) or only what they're invited to (none)")
+  .addArgument(new Argument("<access>").choices(["all", "none"])).option("--team <slug>", "which team").action((access: string, o) => setDefault(access, { team: o.team ?? teamCmd.opts().team }));
+
+program.command("transfer")
+  .description("Make someone else the owner of the active project (or --workspace); you stay on as an editor")
+  .argument("<email>")
+  .option("-w, --workspace <slug>", "the project (defaults to the active one)")
+  .action((email: string, { workspace }) => transferOwnership(email, { workspace }));
 
 program.command("templates").description("List workspace templates").action(() => {
   for (const [name, t] of Object.entries(templates)) console.log(`${name.padEnd(16)} ${t.description}`);

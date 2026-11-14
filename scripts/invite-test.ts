@@ -101,7 +101,7 @@ await step("following the link signs them in with a verified email, and the invi
   const sb = createClient(url, key, { global: { headers: { Authorization: `Bearer ${token}` } }, auth: { persistSession: false } });
   const { data, error } = await sb.rpc("accept_pending_invites");
   assert.equal(error, null);
-  assert.deepEqual(data, [{ team: `acme-${run}`, workspaces: [`paper-${run}`] }]);
+  assert.deepEqual(data, [{ team: `acme-${run}`, name: `Acme ${run}`, workspaces: [`paper-${run}`] }]);
   const { data: mine } = await sb.from("members").select("role,source").eq("workspace_id", ws.id).eq("source", "team");
   assert.deepEqual(mine, [{ role: "viewer", source: "team" }], "granted as a team viewer");
 });

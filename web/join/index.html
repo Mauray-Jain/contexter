@@ -57,7 +57,7 @@
 
   // Joined a team but not given a project yet (a team-only invitation): that is success, not an error.
   if (!projects.length && (accepted ?? []).length + (inTeams ?? []).length) {
-    const names = [...new Set([...(accepted ?? []).map((a) => a.team), ...(inTeams ?? []).map((t) => t.teams?.name).filter(Boolean)])];
+    const names = [...new Set([...(accepted ?? []).map((a) => a.name ?? a.team), ...(inTeams ?? []).map((t) => t.teams?.name).filter(Boolean)])];
     page(el("section", { class: "card pass" }, avatar(user.email, "lg"), el("div", {},
         el("h1", {}, `You're in, welcome to ${names.join(", ")}`),
         el("p", { class: "muted", style: "margin:4px 0 0" }, "No project access yet. A team admin will add you, and this page will then show how to connect your Claude."))),
@@ -78,7 +78,7 @@
 
   // Which project to connect first: one just granted, else the first.
   let chosen = projects.find((p) => justJoined.has(p.slug)) ?? projects[0];
-  const joinedTeams = [...new Set((accepted ?? []).map((a) => a.team))];
+  const joinedTeams = [...new Set((accepted ?? []).map((a) => a.name ?? a.team))];
   const stepsHost = el("div");
   const bar = el("i");
   const progressLabel = el("span", { class: "muted num" });
