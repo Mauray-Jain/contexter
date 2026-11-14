@@ -4,13 +4,27 @@ The familiar category standard, executed carefully: a calm, dense team-admin pro
 
 ## Foundations
 
-- **Surfaces:** dark-first. Near-black neutrals tinted toward indigo (hue 275) with a soft indigo/violet atmosphere behind the work (two fixed radial glows); light mode is a secondary theme with the same hues. Hairline translucent borders, translucent blurred sidebar.
-- **Accent:** one indigo (`--accent`) for primary actions, selection, focus and the brand mark. Semantic green, amber and red appear only for state (`--ok`, `--warn`, `--danger`).
-- **Type:** Figtree for UI (400/500/600/700), JetBrains Mono for commands, refs and codes only. Base 14px, scale 12/13/14/16/24, headings -0.015em.
-- **Elevation:** declared once, as 1px borders. Shadows exist only on floating layers (`--shadow-float`, dialogs).
-- **Shape:** 12px cards, 7-10px controls, pills only for badges and chips.
-- **Motion:** 150-250ms exponential ease-out. Cross-page view transitions with a sliding nav highlight, staggered feed rows on load, a glow sweep for new events, a pulsing Live pill, a drawn check when Claude connects. All motion off under `prefers-reduced-motion`.
-- **Signature:** the ⌘K command palette (also `/`), with single-key shortcuts T, I, G F, G P.
+Palette source: the ui-ux-pro-max "Remote Work / Collaboration Tool" family (calm indigo + success green on a soft lavender ground), with every role named and contrast-checked. Light is the default; dark (deep indigo) is one click or the `T` key away.
+
+| Role | Light | Dark |
+|---|---|---|
+| Ground | `#F5F3FF` + soft indigo glows | `#0C0B1E` + indigo glow |
+| Surface / raised | `#FFFFFF` / `#EEF0FD` | `#14132E` / `#1C1B40` |
+| Text / muted | `#1E1B4B` (14.6:1) / `#475569` (6.9:1) | `#EEF0FF` (17:1) / `#A9ACD9` (8.3:1) |
+| Border | `#E0E7FF` / strong `#C7CDF3` | indigo 14% / 26% |
+| Primary (fills) | `#4F46E5`, white text 6.3:1 | `#818CF8`, `#0F172A` text 6.0:1 |
+| Secondary (rings, gradients) | `#818CF8` | `#6366F1` |
+| Success | text `#047857`, dot `#059669`, soft `#D1FAE5` | `#34D399` |
+| Warning | `#B45309` on `#FEF3C7` | `#FBBF24` |
+| Danger | `#B91C1C` on `#FEE2E2` | `#F87171` |
+
+Notes: the database's black-on-indigo pairing was replaced because it falls short of 4.5:1 for white-on-`#6366F1`; filled indigo uses `#4F46E5`. Indigo as text uses `--accent-ink`.
+
+- **Type:** Plus Jakarta Sans (the skill's "Friendly SaaS" pairing; 800 for display, 700 headings, 400/500 body), JetBrains Mono for commands and refs only.
+- **Elevation:** declared once, as 1px borders. Shadows only on floating layers and the primary button's lift.
+- **Shape:** 12px cards, 7-10px controls, pills for badges, chips and the headline pill.
+- **Motion:** 150-250ms exponential ease-out; cross-page view transitions with a sliding nav highlight; staggered feed rows; a Live dot that pulses only because the feed is live; reduced-motion respected.
+- **Signature:** the headline pill with cycling phrases, the product window on the landing, and the ⌘K palette (also `/`), with single-key shortcuts T, I, G F, G P.
 
 ## Components
 

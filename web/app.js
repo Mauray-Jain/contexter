@@ -68,7 +68,7 @@ function applyTheme(mode) {
 }
 function currentTheme() {
   return document.documentElement.getAttribute("data-theme")
-    ?? "dark";
+    ?? "light";
 }
 export function toggleTheme() {
   const next = currentTheme() === "dark" ? "light" : "dark";
