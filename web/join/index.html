@@ -4,15 +4,19 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Join your team · contexter</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
   <link rel="stylesheet" href="../style.css">
+  <script>try{var t=localStorage.getItem("contexter-theme");if(t)document.documentElement.setAttribute("data-theme",t)}catch(e){}</script>
   <script src="../config.js"></script>
 </head>
 <body>
-<main id="main" class="page"><p class="muted">Loading…</p></main>
+<div id="main"><p class="muted" style="padding:24px">Loading…</p></div>
 <script type="module">
   // Where an emailed invitation lands: sign in, apply the invitation, then walk through
   // connecting Claude. The invitation is matched to the verified email, never to a code.
-  import { cfg, command, el, requireSignIn, sb, signOut } from "../app.js";
+  import { PRODUCT, avatar, cfg, command, el, emptyMark, icon, requireSignIn, sb, signOut } from "../app.js";
 
   const main = document.getElementById("main");
 
@@ -24,7 +28,7 @@
       access_token: fromLink.get("access_token"), refresh_token: fromLink.get("refresh_token"),
     });
     history.replaceState(null, "", location.pathname + location.search); // keep tokens out of the address bar and history
-    if (linkError) main.replaceChildren(el("p", { class: "status-err", role: "alert" }, `This link didn't work: ${linkError.message}. Ask for a new invitation.`));
+    if (linkError) main.replaceChildren(el("p", { class: "status-err", role: "alert", style: "padding:24px" }, `This link didn't work: ${linkError.message}. Ask for a new invitation.`));
   }
 
   const user = await requireSignIn(main, {
@@ -32,7 +36,7 @@
     note: "Sign in with the email address your invitation was sent to.",
   });
 
-  main.replaceChildren(el("p", { class: "muted", role: "status" }, "Applying your invitations…"));
+  main.replaceChildren(el("p", { class: "muted", role: "status", style: "padding:24px" }, "Applying your invitations…"));
   const { data: accepted, error } = await sb.rpc("accept_pending_invites");
   if (error) {
     main.replaceChildren(el("section", { class: "card narrow" }, el("h1", {}, "Something went wrong"),
@@ -40,84 +44,107 @@
     throw error;
   }
 
-  // Every project this person can reach through a team, newest team grants first.
   const { data: mine } = await sb.from("members").select("handle, role, workspaces(id, slug, name, team_id)").eq("user_id", user.id);
   const projects = (mine ?? []).filter((m) => m.workspaces).map((m) => ({ ...m.workspaces, handle: m.handle, role: m.role }));
   const justJoined = new Set((accepted ?? []).flatMap((a) => a.workspaces));
+  const { data: inTeams } = await sb.from("team_members").select("teams(name)").eq("user_id", user.id);
 
-  const header = el("header", { class: "bar" }, el("h1", {}, "Welcome to contexter"), el("span", { class: "spacer" }),
-    el("span", { class: "muted" }, user.email), el("button", { type: "button", onclick: signOut }, "Sign out"));
+  const top = el("header", { class: "join-top" },
+    el("span", { class: "brand", style: "padding:0" }, el("span", { class: "brand-mark" }, icon("feed")), PRODUCT),
+    el("span", { class: "spacer" }), el("span", { class: "muted" }, user.email),
+    el("button", { type: "button", class: "btn-ghost btn-sm", onclick: signOut }, "Sign out"));
+  const page = (...kids) => main.replaceChildren(el("div", { class: "join" }, top, ...kids));
 
   // Joined a team but not given a project yet (a team-only invitation): that is success, not an error.
-  const { data: inTeams } = await sb.from("team_members").select("teams(name)").eq("user_id", user.id);
   if (!projects.length && (accepted ?? []).length + (inTeams ?? []).length) {
     const names = [...new Set([...(accepted ?? []).map((a) => a.team), ...(inTeams ?? []).map((t) => t.teams?.name).filter(Boolean)])];
-    main.replaceChildren(header, el("section", { class: "card" }, el("h2", {}, "You're in"),
-      el("p", {}, "You joined ", el("strong", {}, names.join(", ")), "."),
-      el("p", {}, "You haven't been given access to a project yet. A team admin can add you from the team page, and this page will then show how to connect your Claude."),
-      el("p", {}, el("a", { href: "../team/" }, "Open the team page"))));
+    page(el("section", { class: "card pass" }, avatar(user.email, "lg"), el("div", {},
+        el("h1", {}, `You're in, welcome to ${names.join(", ")}`),
+        el("p", { class: "muted", style: "margin:4px 0 0" }, "No project access yet. A team admin will add you, and this page will then show how to connect your Claude."))),
+      el("p", { style: "margin-top:16px" }, el("a", { href: "../team/" }, "Open the team page")));
     throw new Error("no projects yet");
   }
-
   if (!projects.length) {
-    main.replaceChildren(header, el("section", { class: "card" },
-      el("h2", {}, "No invitations found"),
-      el("p", {}, `There is no pending invitation for ${user.email}. Ask a team admin to invite this exact address, or sign out and use the address they invited.`),
-      el("p", { class: "muted" }, "Have an invite code instead? Run ", el("code", {}, "contexter join <code> --handle <name>"), ".")));
+    page(el("section", { class: "card" }, el("div", { class: "empty" }, emptyMark("mail"),
+      el("h3", {}, "No invitation found"),
+      el("p", {}, `There's no pending invitation for ${user.email}. Ask a team admin to invite this exact address, or sign out and use the address they invited.`),
+      el("p", { class: "muted" }, "Have an invite code instead? Run ", el("code", {}, "contexter join <code> --handle <name>"), "."))));
     throw new Error("no projects");
   }
 
-  const banner = (accepted ?? []).length
-    ? el("section", { class: "card" }, el("h2", {}, "You're in"),
-        ...accepted.map((a) => el("p", {}, "You joined ", el("strong", {}, a.team),
-          a.workspaces.length ? ` with access to ${a.workspaces.join(", ")}.` : ".")))
-    : el("section", { class: "card" }, el("h2", {}, "You're already set up"),
-        el("p", {}, "No new invitations were waiting. Your projects are below."));
-
   // Which project to connect first: one just granted, else the first.
   let chosen = projects.find((p) => justJoined.has(p.slug)) ?? projects[0];
+  const joinedTeams = [...new Set((accepted ?? []).map((a) => a.team))];
   const stepsHost = el("div");
+  const bar = el("i");
+  const progressLabel = el("span", { class: "muted num" });
+  let poll;
+
   const picker = projects.length > 1
-    ? el("label", { class: "field" }, "Project to connect",
-        el("select", { onchange: (e) => { chosen = projects.find((p) => p.slug === e.target.value); renderSteps(); } },
+    ? el("label", { class: "field", style: "margin:0 0 4px" }, "Project to connect",
+        el("select", { style: "max-width:320px", onchange: (e) => { chosen = projects.find((p) => p.slug === e.target.value); renderSteps(); } },
           projects.map((p) => el("option", { value: p.slug, selected: p.slug === chosen.slug }, p.name))))
     : null;
 
-  let poll;
   function renderSteps() {
     clearInterval(poll);
+    const done = new Set();
+    const total = 4;
+    const update = () => { bar.style.width = `${(done.size / total) * 100}%`; progressLabel.textContent = `${done.size} of ${total} done`; };
     const live = el("p", { class: "muted", role: "status", "aria-live": "polite" }, "Waiting for your first Claude session in this project…");
-    stepsHost.replaceChildren(el("ol", { class: "steps" },
-      el("li", {}, el("strong", {}, "Install the contexter command"),
+    const mark = (n) => el("button", { type: "button", class: "btn-sm", onclick: (e) => {
+      const li = e.target.closest("li");
+      if (done.has(n)) { done.delete(n); li.classList.remove("done"); e.target.textContent = "Mark done"; }
+      else { done.add(n); li.classList.add("done"); e.target.textContent = "Done"; }
+      update();
+    } }, "Mark done");
+    const steps = el("ol", { class: "steps" },
+      el("li", {}, el("div", {}, el("h3", {}, "Install the command-line tool"),
+        el("p", {}, "You'll need Node 20 or newer. Run these two commands once."),
         command("git clone https://github.com/Mauray-Jain/contexter && cd contexter && npm install && npm run build"),
         command(`node packages/cli/dist/contexter.mjs setup --url ${cfg.url} --key ${cfg.key}`),
-        el("p", { class: "muted" }, "Then alias it so the rest reads as ", el("code", {}, "contexter"), ": ",
-          el("code", {}, 'alias contexter="node $PWD/packages/cli/dist/contexter.mjs"'))),
-      el("li", {}, el("strong", {}, "Sign in on this machine"), command("contexter login")),
-      el("li", {}, el("strong", {}, `Connect Claude Code to ${chosen.name}`),
-        el("p", { class: "muted" }, "Run this from your project folder:"),
-        command(`contexter install code --workspace ${chosen.slug}`)),
-      el("li", {}, el("strong", {}, "Or connect Claude chat (web, desktop, mobile)"),
-        el("p", { class: "muted" }, "Add this as a custom connector in Claude settings, sign in, then upload the skill:"),
-        command(`${cfg.url}/functions/v1/mcp`), command("contexter install chat")),
-      el("li", {}, el("strong", {}, "Say hello"), el("p", {}, "Open Claude and send any message. This page notices when your first session reaches the team."), live)));
+        el("p", { style: "margin-bottom:10px" }, "Then add a short alias so the rest reads as ", el("code", {}, "contexter"), ":"),
+        command('alias contexter="node $PWD/packages/cli/dist/contexter.mjs"'), mark(1))),
+      el("li", {}, el("div", {}, el("h3", {}, "Sign in on this machine"),
+        el("p", {}, "Use the same email this invitation went to."), command("contexter login"), mark(2))),
+      el("li", {}, el("div", {}, el("h3", {}, `Connect Claude to ${chosen.name}`),
+        el("p", {}, "From your project folder, for Claude Code or the desktop Code tab:"),
+        command(`contexter install code --workspace ${chosen.slug}`),
+        el("p", { style: "margin:8px 0 10px" }, "Or for Claude chat on web, desktop or mobile, add this as a custom connector, then upload the skill:"),
+        command(`${cfg.url}/functions/v1/mcp`), command("contexter install chat"), mark(3))),
+      el("li", {}, el("div", {}, el("h3", {}, "Say hello to your team's Claude"),
+        el("p", {}, "Open Claude and send any message. This page notices when your first session reaches the team."), live)));
+    stepsHost.replaceChildren(steps);
+    update();
 
     const since = new Date().toISOString();
     poll = setInterval(async () => {
       const { data } = await sb.from("sessions").select("id").eq("workspace_id", chosen.id).eq("user_id", user.id).gt("started_at", since).limit(1);
       if (data?.length) {
         clearInterval(poll);
+        [1, 2, 3, 4].forEach((n) => done.add(n));
+        steps.querySelectorAll("li").forEach((li) => li.classList.add("done"));
         live.className = "status-ok";
         live.textContent = "Connected. Your Claude is now in the team's shared workspace.";
+        update();
       }
     }, 4000);
   }
   renderSteps();
 
-  main.replaceChildren(header, el("div", { class: "stack-lg" }, banner,
-    el("section", { class: "card" }, el("h2", {}, "Connect your Claude"), picker, stepsHost),
-    el("p", { class: "muted" }, el("a", { href: `../?w=${chosen.slug}` }, "Open the live team dashboard"), " · ",
-      el("a", { href: "../team/" }, "Manage teams"))));
+  page(
+    el("section", { class: "card pass" }, avatar(user.email, "lg"), el("div", { style: "flex:1;min-width:0" },
+      el("h1", {}, joinedTeams.length ? `You're in. Welcome to ${joinedTeams.join(", ")}` : "You're all set up"),
+      el("p", { class: "muted", style: "margin:4px 0 0" }, joinedTeams.length
+        ? `You can open ${projects.length === 1 ? projects[0].name : `${projects.length} projects`}. Connect your Claude to start sharing context.`
+        : "Your projects are below. Connect your Claude to start sharing context."))),
+    el("section", { class: "card", style: "margin-top:16px" },
+      el("div", { class: "card-head" }, el("h2", {}, "Connect your Claude"), progressLabel),
+      el("div", { style: "padding:0 16px" }, el("div", { class: "progress", "aria-hidden": "true" }, bar)),
+      el("div", { class: "card-body", style: "padding-bottom:4px" }, picker),
+      stepsHost),
+    el("p", { class: "muted", style: "margin-top:16px;display:flex;gap:16px;flex-wrap:wrap" },
+      el("a", { href: `../?w=${chosen.slug}` }, "Open the live feed"), el("a", { href: "../team/" }, "Team page")));
 </script>
 </body>
 </html>
