@@ -68,6 +68,11 @@ function transcript(who: string, turns: { user: string; assistant: string; wrote
   return path;
 }
 
+// Run the CLI as alice from another folder.
+const cliIn = (dir: string, args: string[]) => spawnSync("node", [CLI, ...args], {
+  encoding: "utf8", cwd: dir, env: { ...process.env, CONTEXTER_HOME: join(root, "alice", ".home") },
+}).stdout;
+
 let passed = 0;
 async function step(name: string, fn: () => Promise<void> | void) {
   try { await fn(); passed++; console.log(`ok - ${name}`); } catch (err) { console.log(`not ok - ${name}`); throw err; }
@@ -82,7 +87,14 @@ cli("bob", ["join", code, "--handle", "bob"]);
 await step("install writes hooks, skill and project link", () => {
   for (const who of ["alice", "bob"]) {
     const out = cli(who, ["install", "code", "--workspace", slug]);
-    assert.match(out, /claude mcp add --transport http .* contexter http\S+ --header "x-contexter-client: claude-code"/);
+    assert.match(out, /MCP server added to .*\.mcp\.json/);
+    assert.doesNotMatch(out, /claude mcp add/);
+    const mcp = JSON.parse(readFileSync(join(root, who, ".mcp.json"), "utf8"));
+    assert.equal(mcp.mcpServers.contexter.type, "http");
+    assert.match(mcp.mcpServers.contexter.url, /^http\S+\/functions\/v1\/mcp$/);
+    assert.equal(mcp.mcpServers.contexter.headers["x-contexter-client"], "claude-code");
+    const local = JSON.parse(readFileSync(join(root, who, ".claude/settings.local.json"), "utf8"));
+    assert.deepEqual(local.enabledMcpjsonServers, ["contexter"]);
     assert.deepEqual(Object.keys(installedHooks(who)).sort(),
       ["PostToolUse", "PreToolUse", "SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"]);
     const settings = JSON.parse(readFileSync(join(root, who, ".claude/settings.json"), "utf8"));
@@ -95,6 +107,29 @@ await step("install writes hooks, skill and project link", () => {
   cli("alice", ["install", "code", "--workspace", slug]);
   const s = JSON.parse(readFileSync(join(root, "alice/.claude/settings.json"), "utf8"));
   assert.equal(s.hooks.Stop.length, 1);
+  const again = JSON.parse(readFileSync(join(root, "alice/.claude/settings.local.json"), "utf8"));
+  assert.deepEqual(again.enabledMcpjsonServers, ["contexter"]);
+});
+
+await step("install keeps other MCP servers and settings; uninstall removes only contexter", () => {
+  const dir = join(root, "carol");
+  mkdirSync(join(dir, ".claude"), { recursive: true });
+  writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { other: { type: "http", url: "https://example.test/mcp" } } }));
+  writeFileSync(join(dir, ".claude/settings.local.json"),
+    JSON.stringify({ permissions: { allow: ["Bash(ls)"] }, disabledMcpjsonServers: ["contexter"] }));
+  cliIn(dir, ["install", "code", "--workspace", slug]);
+  let mcp = JSON.parse(readFileSync(join(dir, ".mcp.json"), "utf8"));
+  assert.deepEqual(Object.keys(mcp.mcpServers).sort(), ["contexter", "other"]);
+  let local = JSON.parse(readFileSync(join(dir, ".claude/settings.local.json"), "utf8"));
+  assert.deepEqual(local.permissions.allow, ["Bash(ls)"]);
+  assert.deepEqual(local.enabledMcpjsonServers, ["contexter"]);
+  assert.equal(local.disabledMcpjsonServers, undefined);
+
+  cliIn(dir, ["uninstall"]);
+  mcp = JSON.parse(readFileSync(join(dir, ".mcp.json"), "utf8"));
+  assert.deepEqual(Object.keys(mcp.mcpServers), ["other"]);
+  local = JSON.parse(readFileSync(join(dir, ".claude/settings.local.json"), "utf8"));
+  assert.deepEqual(local, { permissions: { allow: ["Bash(ls)"] } });
 });
 
 await step("bob's session starts with the workspace overview", () => {
@@ -145,10 +180,6 @@ function hookIn(dir: string, event: string, input: Record<string, unknown>) {
   });
   return r.stdout ? JSON.parse(r.stdout).hookSpecificOutput?.additionalContext ?? "" : "";
 }
-
-const cliIn = (dir: string, args: string[]) => spawnSync("node", [CLI, ...args], {
-  encoding: "utf8", cwd: dir, env: { ...process.env, CONTEXTER_HOME: join(root, "alice", ".home") },
-}).stdout;
 
 await step("other projects stay out of the workspace: only linked folders join it", () => {
   const other = join(root, "other-project");

@@ -47,6 +47,50 @@ function withoutContexterHooks(settings: Record<string, any>) {
   return settings;
 }
 
+const MCP_NAME = "contexter";
+
+function writeJson(path: string, value: Record<string, any>) {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+// Claude Code only loads a .mcp.json server once it's approved, and the desktop Code tab never asks,
+// so approve it in the folder's personal (git-ignored) settings.local.json.
+function addProjectMcp(cwd: string) {
+  const mcpPath = join(cwd, ".mcp.json");
+  const mcp = readJson(mcpPath);
+  mcp.mcpServers ??= {};
+  mcp.mcpServers[MCP_NAME] = { type: "http", url: mcpUrl(), headers: { "x-contexter-client": "claude-code" } };
+  writeJson(mcpPath, mcp);
+
+  const localPath = join(cwd, ".claude", "settings.local.json");
+  const local = readJson(localPath);
+  local.enabledMcpjsonServers = [...new Set([...(local.enabledMcpjsonServers ?? []), MCP_NAME])];
+  local.disabledMcpjsonServers = (local.disabledMcpjsonServers ?? []).filter((n: string) => n !== MCP_NAME);
+  if (!local.disabledMcpjsonServers.length) delete local.disabledMcpjsonServers;
+  writeJson(localPath, local);
+  return [`MCP server added to ${mcpPath}`, `MCP server approved in ${localPath}`];
+}
+
+function removeProjectMcp(cwd: string) {
+  const mcpPath = join(cwd, ".mcp.json");
+  if (existsSync(mcpPath)) {
+    const mcp = readJson(mcpPath);
+    if (mcp.mcpServers) delete mcp.mcpServers[MCP_NAME];
+    if (mcp.mcpServers && !Object.keys(mcp.mcpServers).length) rmSync(mcpPath);
+    else writeJson(mcpPath, mcp);
+  }
+  const localPath = join(cwd, ".claude", "settings.local.json");
+  if (existsSync(localPath)) {
+    const local = readJson(localPath);
+    if (local.enabledMcpjsonServers) {
+      local.enabledMcpjsonServers = local.enabledMcpjsonServers.filter((n: string) => n !== MCP_NAME);
+      if (!local.enabledMcpjsonServers.length) delete local.enabledMcpjsonServers;
+    }
+    writeJson(localPath, local);
+  }
+}
+
 export function installCode(opts: { scope: "user" | "project"; workspace?: string; cwd: string }) {
   if (!existsSync(bundle)) throw new CliError(`Build the CLI first: npm run build (missing ${bundle})`);
   const path = settingsPath(opts.scope, opts.cwd);
@@ -77,12 +121,21 @@ export function installCode(opts: { scope: "user" | "project"; workspace?: strin
   } else {
     done.push("Sessions only join a workspace in a linked project folder: run `contexter link <slug>` in each one.");
   }
+  if (opts.scope === "project") {
+    return [
+      ...done,
+      ...addProjectMcp(opts.cwd),
+      "",
+      "Start a new Claude Code session here; contexter signs you in through the browser on first use.",
+    ].join("\n");
+  }
+  // User-scope servers live in ~/.claude.json, which Claude Code rewrites while running, so leave it to the CLI.
   return [
     ...done,
     "",
     "Last step: add the contexter MCP server to Claude Code (it signs you in through the browser on first use):",
     "",
-    `  claude mcp add --transport http --scope ${opts.scope === "user" ? "user" : "project"} contexter ${mcpUrl()} --header "x-contexter-client: claude-code"`,
+    `  claude mcp add --transport http --scope user ${MCP_NAME} ${mcpUrl()} --header "x-contexter-client: claude-code"`,
   ].join("\n");
 }
 
@@ -91,6 +144,10 @@ export function uninstallCode(opts: { scope: "user" | "project"; cwd: string }) 
   if (existsSync(path)) writeFileSync(path, `${JSON.stringify(withoutContexterHooks(readJson(path)), null, 2)}\n`);
   const skillsRoot = opts.scope === "user" ? join(homedir(), ".claude", "skills") : join(opts.cwd, ".claude", "skills");
   rmSync(join(skillsRoot, "contexter"), { recursive: true, force: true });
+  if (opts.scope === "project") {
+    removeProjectMcp(opts.cwd);
+    return `Removed contexter hooks from ${path}, the contexter skill and the contexter MCP server.`;
+  }
   return `Removed contexter hooks from ${path} and the contexter skill.`;
 }
 
