@@ -7,6 +7,7 @@ import { withOAuthProtectedResource, withSupabase } from "@supabase/server";
 import { createMcpHandler, McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
 import { z } from "zod/v4";
 import * as core from "../_shared/contexter.ts";
+import { embedText, sweepInBackground } from "../_shared/embeddings.ts";
 
 const workspace = z.string().optional()
   .describe("Workspace slug. Omit to use your default workspace (see use_workspace).");
@@ -16,6 +17,14 @@ type Text = { content: { type: "text"; text: string }[]; isError?: boolean };
 const text = (...parts: string[]): Text => ({
   content: parts.filter(Boolean).map((t) => ({ type: "text" as const, text: t })),
 });
+
+// After a search, embed a little more of the workspace in the background, so what isn't
+// searchable by meaning yet becomes so without anyone waiting for it.
+async function withSweep(ctx: core.Ctx, result: Promise<string>) {
+  const out = await result;
+  sweepInBackground(ctx.db, ctx.ws.id);
+  return out;
+}
 
 function buildServer(db: core.Db, userId: string, client: core.Client) {
   const server = new McpServer(
@@ -30,6 +39,7 @@ function buildServer(db: core.Db, userId: string, client: core.Client) {
       const ctx = await core.loadCtx(db, userId, client === "claude-code"
         ? { workspace: ws, session: null }
         : { workspace: ws, client, title: "Claude chat" });
+      ctx.embed = embedText;
       const result = await fn(ctx);
       const delta = opts.delta ? await core.feedDelta(ctx) : "";
       return text(result, delta);
@@ -215,14 +225,15 @@ function buildServer(db: core.Db, userId: string, client: core.Client) {
     description: "Explain a unit or record from the reasoning and edit history; or search reasoning for a question.",
     inputSchema: z.object({ workspace, target: z.string().describe("A unit ref, a record ref, or a free-text question") }),
     annotations: { readOnlyHint: true },
-  }, async ({ workspace, target }) => run(workspace, (ctx) => core.why(ctx, target)));
+  }, async ({ workspace, target }) => run(workspace, (ctx) => withSweep(ctx, core.why(ctx, target))));
 
   server.registerTool("search", {
     title: "Search the workspace",
-    description: "Full-text search across units, reasoning records and the feed.",
+    description: "Search units, reasoning records and the feed by words and by meaning (finds related " +
+      "passages even when they use different words; those are marked \"similar meaning\").",
     inputSchema: z.object({ workspace, query: z.string(), limit: z.number().int().min(1).max(50).optional() }),
     annotations: { readOnlyHint: true },
-  }, async ({ workspace, query, limit }) => run(workspace, (ctx) => core.search(ctx, query, limit)));
+  }, async ({ workspace, query, limit }) => run(workspace, (ctx) => withSweep(ctx, core.search(ctx, query, limit))));
 
   server.registerTool("mention", {
     title: "Message a teammate",

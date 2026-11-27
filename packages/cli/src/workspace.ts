@@ -13,6 +13,39 @@ export async function cliCtx(workspace?: string) {
   return core.loadCtx(sb, user.id, { workspace: workspace ?? loadConfig().activeWorkspace?.slug, session: null });
 }
 
+// Semantic search for the CLI: the query is embedded by the `embed` Edge Function. Search must
+// never hang on it (the model loads slowly the first time, or the function may not be deployed
+// yet), so after a few seconds it falls back to full-text search alone.
+export async function searchCtx(workspace?: string) {
+  const ctx = await cliCtx(workspace);
+  const sb = getClient();
+  ctx.embed = async (query) => {
+    const call = sb.functions.invoke("embed", { body: { workspace: ctx.ws.id, query } })
+      .then(({ data, error }: { data: any; error: unknown }) => (error || !Array.isArray(data?.embedding) ? null : data.embedding as number[]));
+    const timeout = new Promise<null>((r) => setTimeout(() => r(null), Number(process.env.CONTEXTER_EMBED_TIMEOUT_MS ?? 4000)).unref());
+    return Promise.race([call, timeout]).catch(() => null);
+  };
+  return ctx;
+}
+
+// Embed everything in the workspace that isn't yet, about a second of work per request.
+export async function reindex(workspace?: string) {
+  const ctx = await cliCtx(workspace);
+  const sb = getClient();
+  let total = 0;
+  for (;;) {
+    const { data, error } = await sb.functions.invoke("embed", { body: { workspace: ctx.ws.id, sweep: true } });
+    if (error) throw new CliError(`Reindexing failed: ${(error as Error).message}. Is the embed Edge Function deployed?`);
+    total += data.embedded;
+    if (!data.remaining) break;
+    if (!data.embedded) throw new CliError(`Reindexing stalled with ${data.remaining} item(s) left; try again.`);
+    process.stderr.write(`  embedded ${total}, ${data.remaining} to go\n`);
+  }
+  return total
+    ? `Embedded ${total} item(s) in ${ctx.ws.slug}. Everything is searchable by meaning.`
+    : `Everything in ${ctx.ws.slug} is already searchable by meaning.`;
+}
+
 const has = (cmd: string) => spawnSync("which", [cmd], { stdio: "ignore" }).status === 0;
 
 // Bibliography: the first unit whose key or collection says "bib"/"refs", if it has content.

@@ -115,6 +115,7 @@ unit, open questions, who is doing what; under ~600 words) and the `covers_up_to
 ## Other tools
 
 - `resume`: full catch-up for a fresh conversation (overview, memory and everything since).
-- `team_feed`: browse history (by member or unit). `search`: full-text across everything.
+- `team_feed`: browse history (by member or unit). `search`: across everything, by words and by meaning (a
+  paraphrase finds the passage; such hits are marked "similar meaning", so check they fit).
 - `mention`: leave a message for teammates; their Claude raises it on their next message.
 - `list_workspaces` / `use_workspace`: if the user is in several workspaces.

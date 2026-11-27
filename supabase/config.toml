@@ -431,3 +431,6 @@ verify_jwt = false
 # Checks the caller's token itself and acts as them (team admins only, enforced in the database).
 [functions.invite-members]
 verify_jwt = false
+
+[functions.embed]
+verify_jwt = false

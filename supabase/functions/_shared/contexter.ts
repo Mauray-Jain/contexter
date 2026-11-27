@@ -28,6 +28,9 @@ export interface Ctx {
   me: { handle: string; role: string };
   handles: Map<string, string>; // user_id → handle
   session?: string; // contexter session id, when this caller has one
+  // Turns a search query into a gte-small embedding for semantic search. The MCP server embeds
+  // in-process; the CLI asks the `embed` Edge Function. Absent or failing: full-text search only.
+  embed?: (query: string) => Promise<number[] | null>;
 }
 
 export interface Unit {
@@ -856,10 +859,18 @@ export async function why(ctx: Ctx, target: string) {
   return search(ctx, target);
 }
 
+// Hybrid search: full-text plus, when an embedder is available, similar meaning. Hits found only
+// by meaning are marked, since they may not contain the words searched for.
 export async function search(ctx: Ctx, query: string, limit = 15) {
-  const rows = unwrap(await ctx.db.rpc("search_workspace", { p_workspace: ctx.ws.id, p_query: query, p_limit: limit })) as Any[];
+  const embedding = ctx.embed ? await ctx.embed(query).catch(() => null) : null;
+  const args: Record<string, unknown> = { p_workspace: ctx.ws.id, p_query: query, p_limit: limit };
+  if (embedding) args.p_embedding = JSON.stringify(embedding);
+  const rows = unwrap(await ctx.db.rpc("search_workspace", args)) as Any[];
   if (!rows.length) return `Nothing in ${ctx.ws.slug} matches "${query}".`;
-  return rows.map((r) => `[${r.kind}] ${r.ref} — ${truncate(r.title ?? "", 80)}\n  ${truncate(String(r.snippet).replace(/<\/?b>/g, "**"), 300)}`).join("\n");
+  return rows.map((r) => {
+    const tag = r.match === "meaning" ? " (similar meaning)" : "";
+    return `[${r.kind}] ${r.ref}${tag} — ${truncate(r.title ?? "", 80)}\n  ${truncate(String(r.snippet).replace(/<\/?b>/g, "**").replace(/\s+/g, " "), 300)}`;
+  }).join("\n");
 }
 
 // ─────────────────────────────────────────────────────────────── turns & mentions
