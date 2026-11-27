@@ -37,6 +37,10 @@ web, mobile), all through one remote MCP server on Supabase. See [PLAN.md](PLAN.
 - **Export** through pandoc (md, pdf, docx, html, tex, epub) with citations from the workspace
   bibliography and an optional reasoning appendix. Also a **git mirror** for backups.
 - **Dashboard:** a web page with the live feed, who's active, units, locks, questions and decisions.
+- **Teams:** people, projects and per-project access in one place. Admins invite by email from
+  the web or the CLI, pick each person's team role and project access, and set what new members
+  get by default. Invitees follow the emailed link to a join page that walks them through
+  connecting Claude.
 
 ## Setting it up for your team
 
@@ -53,8 +57,11 @@ One person sets up the backend once; everyone else just connects.
      (step 2). Add `http://127.0.0.1:54545/callback` to the redirect URLs (CLI sign-in).
    - **Authentication → Providers → GitHub:** enable it with a GitHub OAuth app (optional; email
      codes work without it). For email codes, put `{{ .Token }}` in the *Magic link* and
-     *Confirm signup* templates (see `supabase/templates/`).
-2. Push the schema and deploy the MCP server:
+     *Confirm signup* templates, and use `supabase/templates/invite.html` for *Invite user*.
+     Add `<site-url>/join` to the redirect URLs too (invitation links land there).
+   - **Authentication → SMTP:** set up a custom SMTP server. The built-in mailer only sends to
+     your own team's addresses and is heavily rate-limited, so invitations to anyone else fail.
+2. Push the schema and deploy the MCP server and the invitation mailer:
    ```bash
    npx supabase link --project-ref <ref>
    ```
@@ -64,6 +71,13 @@ One person sets up the backend once; everyone else just connects.
    ```bash
    npx supabase functions deploy mcp --no-verify-jwt
    ```
+   ```bash
+   npx supabase functions deploy invite-members --no-verify-jwt
+   ```
+   ```bash
+   npx supabase secrets set CONTEXTER_WEB_URL=https://<where-the-web-pages-live>
+   ```
+   `CONTEXTER_WEB_URL` is where invitation emails link to (`<url>/join`).
 3. Publish the web pages (consent screen and dashboard). With GitHub Pages: set repository
    variables `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`, set Pages to "GitHub Actions", and
    push. The `pages` workflow deploys `web/`. Any static host works; it just needs `config.js`.
@@ -86,21 +100,40 @@ node packages/cli/dist/contexter.mjs login
 
 (Alias it: `alias contexter="node $PWD/packages/cli/dist/contexter.mjs"`.)
 
-One person creates the workspace and invites the others:
+One person creates a team and a project (a *workspace* in the CLI) in it. This works from the
+web app too (sign in, then **Projects → New project**):
 
 ```bash
-contexter init retrieval-paper --handle mauray --template research-paper
+contexter team create lab --name "Retrieval lab"
 ```
 
 ```bash
-contexter invite --uses 2
+contexter init retrieval-paper --team lab --template research-paper
 ```
 
-The others join:
+Then invites everyone by email, with **Invite people** on the web or with:
 
 ```bash
-contexter join <code> --handle priya
+contexter invite priya@lab.org sam@lab.org
 ```
+
+By default an invitation gives access to the active project as an editor. `-p` picks other
+projects, `--role viewer` gives read-only access, and `--admin` makes them team admins.
+`contexter team default all` gives every new member every project.
+
+Each invitee follows the link in the email to the join page, which shows the commands to connect
+Claude. After signing in with the CLI, accepting is one command:
+
+```bash
+contexter join
+```
+
+Managing the team later: `contexter team` (projects, people, access and pending invitations),
+`team role <email> <owner|admin|member>`, `team remove <email>`, `team invites`,
+`team revoke <email>`, and `contexter transfer <email>` to hand a project to someone else.
+
+Without a team, `contexter init <slug>` makes a standalone project, and `contexter invite` with
+no emails prints an invite code (`--uses`, `--days`) that others redeem with `contexter join <code>`.
 
 ### 3. Connect Claude
 
@@ -110,7 +143,9 @@ contexter join <code> --handle priya
 contexter install code --workspace retrieval-paper
 ```
 
-It adds the hooks and the skill, then prints a `claude mcp add …` command to run once.
+It adds the hooks, the skill and the MCP server (`.mcp.json`), and approves the server in your
+git-ignored `.claude/settings.local.json`, since the Code tab never asks. Start a new session
+afterwards. With `--scope user` it prints a `claude mcp add …` command to run once instead.
 
 Claude Code sessions only join a workspace from a folder linked to it (a `.contexter.json`), so
 each project sees only its own team's tasks. With `--scope user` (hooks for every project), link
@@ -128,6 +163,48 @@ contexter install chat
 
 It packages the skill and prints the steps: add the MCP URL as a custom connector, sign in and
 approve, then upload the skill. Start any chat with "catch me up".
+
+### 4. Updating
+
+After a change is merged to `main`, the backend comes first, then every member.
+
+**Backend** (the person who set it up), from an up-to-date `main`. Redeploy every function that
+changed (`mcp`, `invite-members`). Deploying from an older branch
+would roll the MCP server back.
+
+```bash
+git checkout main && git pull
+```
+
+```bash
+npx supabase db push --dry-run
+```
+
+Check it lists only the new migrations, then apply them and redeploy the MCP server:
+
+```bash
+npx supabase db push
+```
+
+```bash
+npx supabase functions deploy mcp --no-verify-jwt
+```
+
+**Each member**, on every machine:
+
+```bash
+cd <your contexter clone> && git checkout main && git pull && npm install && npm run build
+```
+
+Then, in each project folder connected to the workspace:
+
+```bash
+contexter install code --workspace <slug>
+```
+
+The hooks call the built CLI, so open Claude Code sessions pick up the new build on their next
+message. Re-running `install code` adds any hooks a new version needs and refreshes the
+contexter entry in `.mcp.json`, leaving your other servers alone. Claude chat needs nothing unless a release says to upload the skill again.
 
 ## Everyday use
 
@@ -148,7 +225,7 @@ Just talk to Claude. Useful phrases and commands:
 | `contexter export --format pdf --with-reasoning` | The paper, with a reasoning appendix |
 | `contexter mirror ../paper-backup` | Plain-file git backup of everything |
 
-Other commands: `runs [n] [--watch]`, `handoffs [n] [--accept|--decline]`, `status`, `feed`, `memory`, `search`, `why`, `workspaces`, `use`, `templates`, `uninstall`.
+Other commands: `team …`, `transfer`, `link`/`unlink`, `runs [n] [--watch]`, `handoffs [n] [--accept|--decline]`, `status`, `feed`, `memory`, `search`, `why`, `workspaces`, `use`, `templates`, `uninstall`.
 
 ## Development
 
@@ -175,16 +252,18 @@ rules, locks, versions, feed, memory, search), MCP server, the full OAuth connec
 Code hooks, CLI features and an end-to-end CLI run. The local stack uses ports **553xx** (API
 `55321`, mail viewer `55324`), so it can run next to other Supabase projects.
 
-`npm run web` serves the consent page and dashboard at http://127.0.0.1:3000.
+`npm run web` serves the web app (sign-in, team admin, join page, consent page and dashboard) at
+http://127.0.0.1:3000.
 `npm run seed -- you@example.com` fills a demo workspace (sign in at the dashboard with that
 email; the code arrives in the mail viewer).
 
 ```
 supabase/migrations/        schema, RLS, RPCs (sessions, feed, locks, versions, memory, search)
 supabase/functions/mcp/     remote MCP server (Edge Function, OAuth via Supabase Auth)
+supabase/functions/invite-members/  sends team invitation emails
 supabase/functions/_shared/ core logic shared by the MCP server and the CLI
 packages/cli/               contexter CLI and Claude Code hooks
 skill/contexter/            the Claude skill (rules for working in a workspace)
-web/                        consent page + live dashboard (static)
+web/                        web app: team admin, join, consent page, live dashboard (static)
 scripts/                    build, local web server, demo seed, test suites
 ```

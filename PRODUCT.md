@@ -28,10 +28,10 @@ Used on laptops beside a terminal and a Claude window, often left open as a live
 
 ## Capabilities and Constraints
 
-- Admin: create team, see projects and people with per-project access, invite by email with team role and project grants, resend/revoke invitations, change roles, remove people, set a default for new members.
+- Admin: create team, create projects, see projects and people with per-project access, invite by email with team role and project grants, resend/revoke invitations, change roles, remove people, set a default for new members.
 - Member: accept invitation, connect Claude Code or Claude chat via copied commands, see their projects, open the live dashboard.
 - Live dashboard: team feed (realtime), who is active now, units and their status/locks, open questions, decisions, team memory.
-- Projects are created from the CLI (templates); the web shows the command.
+- Projects are created from the web (team admins pick a name and template) or the CLI (`contexter init --team`); either way the server seeds the template and applies the team's default access. Ownership of a project can be transferred.
 - Terminology: team, project (a workspace in the code), member, invitation, feed, unit, decision, team memory.
 - Undecided: the product name ("contexter" may change), so keep the name in one place; no logo yet.
 
