@@ -163,6 +163,22 @@ await step("search, history and diff", async () => {
   assert.match(diff, /- We use dense retrieval\.\n\+ We use dense retrieval with re-ranking\./);
 });
 
+await step("search by meaning: a paraphrase with none of the words finds the unit", async () => {
+  // Searches embed the workspace in the background; the first one also loads the model.
+  const query = "how are the retrieved passages put in order";
+  let out = "";
+  for (const deadline = Date.now() + 120_000; Date.now() < deadline;) {
+    out = (await B.call("search", { query })).text;
+    if (/\[unit\] sections\/method \(similar meaning\)/.test(out)) break;
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  assert.match(out, /\[unit\] sections\/method \(similar meaning\)/);
+  // Words still win where they match: no "similar meaning" tag on a word hit.
+  assert.match((await B.call("search", { query: "re-ranking" })).text, /\[unit\] sections\/method — /);
+  // And something unrelated isn't dressed up as a match.
+  assert.match((await B.call("search", { query: "a recipe for chocolate cake with frosting" })).text, /^Nothing in .* matches/);
+});
+
 await step("shared memory: compact, then resume shows it", async () => {
   const m = await A.call("compact_memory", { summary: "Alice drafted the method (dense retrieval + re-ranking); BM25 baseline dropped (D-0001).", covers_up_to: 999999 });
   assert.match(m.text, /Shared memory is now v1/);

@@ -8,7 +8,7 @@ import { acceptInvites, createTeam, handleFromEmail, inviteByEmail, listInvites,
 import * as core from "../../../supabase/functions/_shared/contexter.ts";
 import { runHook } from "./hooks.ts";
 import { chatInstructions, installCode, packageSkill, uninstallCode } from "./install.ts";
-import { cliCtx, exportWorkspace, mirror, watch } from "./workspace.ts";
+import { cliCtx, exportWorkspace, mirror, reindex, searchCtx, watch } from "./workspace.ts";
 import { runJob } from "./run.ts";
 import { activeModalProfile, ensureModalDaemon, modalDaemon } from "./modal.ts";
 import { linkedWorkspace, projectRoot, projectWorkspace } from "./hooks.ts";
@@ -203,12 +203,15 @@ program.command("memory").description("Show the team's shared memory and everyth
   console.log(await core.memoryContext(await cliCtx()));
 });
 
-program.command("search").description("Search units, reasoning and the feed").argument("<query...>")
-  .action(async (query: string[]) => console.log(await core.search(await cliCtx(), query.join(" "))));
+program.command("search").description("Search units, reasoning and the feed, by words and by meaning").argument("<query...>")
+  .action(async (query: string[]) => console.log(await core.search(await searchCtx(), query.join(" "))));
+
+program.command("reindex").description("Make everything in the active workspace searchable by meaning now (search also catches up on its own)")
+  .action(async () => console.log(await reindex()));
 
 program.command("why").description("Explain a unit or record from its reasoning and history")
   .argument("<target>", "unit ref (sections/method), record ref (D-0007) or a question")
-  .action(async (target) => console.log(await core.why(await cliCtx(), target)));
+  .action(async (target) => console.log(await core.why(await searchCtx(), target)));
 
 program.command("export")
   .description("Export the workspace (ordered units) with pandoc")

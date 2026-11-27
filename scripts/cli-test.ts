@@ -87,6 +87,14 @@ await step("search, why and memory", () => {
   assert.match(cli("writer", ["memory"]), /shared memory/);
 });
 
+await step("reindex embeds the workspace; search then finds a paraphrase by meaning", () => {
+  // The first call can wait for the Edge runtime to load the model.
+  assert.match(cli("writer", ["reindex"]), /Embedded \d+ item\(s\)|already searchable by meaning/);
+  assert.match(cli("writer", ["reindex"]), /already searchable by meaning/);
+  assert.match(cli("writer", ["search", "how", "candidate", "passages", "get", "reordered"]),
+    /\[unit\] sections\/method \(similar meaning\)/);
+});
+
 await step("watch streams teammates' events live", async () => {
   await login("teammate", `teammate-${run}@cli.local`);
   const code = /^ {2}(\S+)$/m.exec(cli("writer", ["invite"]))![1];

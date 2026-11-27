@@ -29,6 +29,10 @@ web, mobile), all through one remote MCP server on Supabase. See [PLAN.md](PLAN.
 - **Shared reasoning.** Decisions, rationales, rejected alternatives, findings and open questions,
   numbered (D-0007, Q-0002) and linked to the content they explain. Every write records its "why".
   `why sections/method` answers from the record.
+- **Search by words and by meaning.** `search` combines full-text with semantic search
+  (pgvector, embedded by the gte-small model built into Supabase Edge Functions, so no API key),
+  so "how are passages ordered?" finds the re-ranking section. Hits found only by meaning are
+  marked as such.
 - **Team memory.** A running summary that any member's Claude updates when the feed gets long,
   so a fresh session starts with the whole story so far.
 - **Presence** ("priya is active in claude-chat"), **@mentions**, and **`!private`** messages
@@ -69,6 +73,16 @@ One person sets up the backend once; everyone else just connects.
    push. The `pages` workflow deploys `web/`. Any static host works; it just needs `config.js`.
 
 The publishable key is safe to share. **Never share the secret/service-role key.**
+
+Semantic search also needs the `embed` function (the CLI uses it to embed queries; without it,
+CLI search is full-text only):
+
+```bash
+npx supabase functions deploy embed --no-verify-jwt
+```
+
+Existing content becomes searchable by meaning gradually as people search. To do it all at once,
+any member runs `contexter reindex` in each project.
 
 ### 2. Each member
 
@@ -148,7 +162,7 @@ Just talk to Claude. Useful phrases and commands:
 | `contexter export --format pdf --with-reasoning` | The paper, with a reasoning appendix |
 | `contexter mirror ../paper-backup` | Plain-file git backup of everything |
 
-Other commands: `runs [n] [--watch]`, `handoffs [n] [--accept|--decline]`, `status`, `feed`, `memory`, `search`, `why`, `workspaces`, `use`, `templates`, `uninstall`.
+Other commands: `runs [n] [--watch]`, `handoffs [n] [--accept|--decline]`, `status`, `feed`, `memory`, `search`, `reindex`, `why`, `workspaces`, `use`, `templates`, `uninstall`.
 
 ## Development
 
@@ -171,7 +185,7 @@ npm test
 ```
 
 `npm test` builds the CLI and runs every suite against the local stack: database (pgTAP: access
-rules, locks, versions, feed, memory, search), MCP server, the full OAuth connector flow, Claude
+rules, locks, versions, feed, memory, search, embeddings), MCP server, the full OAuth connector flow, Claude
 Code hooks, CLI features and an end-to-end CLI run. The local stack uses ports **553xx** (API
 `55321`, mail viewer `55324`), so it can run next to other Supabase projects.
 
@@ -180,7 +194,7 @@ Code hooks, CLI features and an end-to-end CLI run. The local stack uses ports *
 email; the code arrives in the mail viewer).
 
 ```
-supabase/migrations/        schema, RLS, RPCs (sessions, feed, locks, versions, memory, search)
+supabase/migrations/        schema, RLS, RPCs (sessions, feed, locks, versions, memory, search, embeddings)
 supabase/functions/mcp/     remote MCP server (Edge Function, OAuth via Supabase Auth)
 supabase/functions/_shared/ core logic shared by the MCP server and the CLI
 packages/cli/               contexter CLI and Claude Code hooks

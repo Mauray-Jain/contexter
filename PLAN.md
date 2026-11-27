@@ -103,8 +103,9 @@ records        (id, workspace_id, type, title, body, links jsonb,
 shared_memory  (workspace_id, version, summary, covers_up_to_event, created_by, created_at)
 ```
 - **Storage bucket** `assets/` for figures, PDFs, datasets.
-- **Full-text search** (`tsvector`) on unit content, records and event payloads. `pgvector`
-  can be added later.
+- **Hybrid search**: full-text (`tsvector`) plus `pgvector` embeddings of unit content (chunked),
+  records and prompts/replies, fused by reciprocal rank. Embeddings come from gte-small inside
+  Edge Functions (no API key), filled lazily after searches or with `contexter reindex`.
 
 ### 4.2 Security
 - **Row Level Security** on every table: you can only access rows of workspaces you're a member of.
@@ -246,7 +247,7 @@ member's Claude sees the same structure and rules.
 | 3. Chat ✅ | contexter skill, write safety net, prompts/resources, dashboard | A member on web or mobile chat and a Code member see each other's turns |
 | 4. Memory + presence ✅ | compaction flow, presence, `@mentions`, `!private` | A fresh session a week later starts with an accurate team summary |
 | 5. Templates + export ✅ | `research-paper`, `blank`, pandoc export, git mirror | Your paper exports to PDF from the workspace |
-| 6. Polish (mostly ✅: notifications, dashboard, full-text search, all templates; pgvector not done) | notifications, web viewer of feed/units, pgvector search, more templates | As needed |
+| 6. Polish ✅ (notifications, dashboard, hybrid full-text + pgvector search, all templates) | notifications, web viewer of feed/units, pgvector search, more templates | As needed |
 
 ## 10. Open decisions
 1. **Supabase hosting:** hosted free tier (recommended to start; 3 users is tiny) or self-hosted.

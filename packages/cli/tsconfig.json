@@ -9,5 +9,6 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["src", "../../supabase/functions/_shared"]
+  "include": ["src", "../../supabase/functions/_shared"],
+  "exclude": ["../../supabase/functions/_shared/embeddings.ts"]
 }
